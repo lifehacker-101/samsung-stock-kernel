@@ -13977,12 +13977,14 @@ tANI_BOOLEAN sme_handleSetFccChannel(tHalHandle hHal, tANI_U8 fcc_constraint,
                  (!sme_Is11dSupported(hHal)) )
     {
         pMac->scan.fcc_constraint = !fcc_constraint;
+           smsLog(pMac, LOGE,"fcc_constraint is %d and scan_pending is %d",
+                           pMac->scan.fcc_constraint,scan_pending);
 
         if (scan_pending == TRUE) {
             pMac->scan.defer_update_channel_list = true;
         } else {
             /* update the channel list to the firmware */
-            csrUpdateChannelList(pMac);
+            csrUpdateFCCChannelList(pMac);
         }
     }
 

@@ -1546,7 +1546,11 @@ static struct rcg_clk byte1_clk_src = {
 };
 
 static struct clk_freq_tbl ftbl_gcc_mdss_esc0_clk[] = {
+#if defined(CONFIG_SAMSUNG_12_8MHZ_ESC_CLOCK)
+	F( 12800000,	xo,	1.5,	0,	0),
+#else
 	F( 19200000,	xo,	1,	0,	0),
+#endif
 	F_END
 };
 

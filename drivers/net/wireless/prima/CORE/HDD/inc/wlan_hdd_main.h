@@ -150,9 +150,15 @@
 
 #define MAX_CFG_STRING_LEN  255
 
+#ifdef CONFIG_SEC
+#define MAC_ADDR_ARRAY(a) (a)[0], (a)[4], (a)[5]
+/** Mac Address string **/
+#define MAC_ADDRESS_STR "%02x:%02x:%02x"
+#else
 #define MAC_ADDR_ARRAY(a) (a)[0], (a)[1], (a)[2], (a)[3], (a)[4], (a)[5]
 /** Mac Address string **/
 #define MAC_ADDRESS_STR "%02x:%02x:%02x:%02x:%02x:%02x"
+#endif /* CONFIG_SEC */
 #define MAC_ADDRESS_STR_LEN 18 /* Including null terminator */
 #define MAX_GENIE_LEN 255
 
@@ -241,8 +247,6 @@ typedef v_U8_t tWlanHddMacAddr[HDD_MAC_ADDR_LEN];
 
 #endif
 #define SCAN_REJECT_THRESHOLD_TIME 300000 /* Time is in msec, equal to 5 mins */
-#define SCAN_REJECT_THRESHOLD 15
-
 
 #define WLAN_WAIT_TIME_EXTSCAN  1000
 
@@ -769,7 +773,6 @@ struct hdd_station_ctx
    hdd_ibss_peer_info_t ibss_peer_info;
 
    v_BOOL_t hdd_ReassocScenario;
-   v_BOOL_t get_mgmt_log_sent;
 
 };
 
@@ -1642,8 +1645,6 @@ struct hdd_context_s
     v_U8_t last_scan_reject_session_id;
     scan_reject_states last_scan_reject_reason;
     v_TIME_t last_scan_reject_timestamp;
-    v_U8_t scan_reject_cnt;
-    bool is_fatal_event_log_sup;
 };
 
 typedef enum  {

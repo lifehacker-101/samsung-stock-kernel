@@ -236,7 +236,7 @@ struct spcom_device {
 	int channel_count;
 
 	/* private */
-	struct mutex lock;
+	struct mutex cmd_lock;
 
 	/* Link state */
 	struct completion link_state_changed;
@@ -964,6 +964,7 @@ struct spcom_client *spcom_register_client(struct spcom_client_info *info)
 	ch = spcom_find_channel_by_name(name);
 	if (!ch) {
 		pr_err("channel %s doesn't exist, load App first.\n", name);
+		kfree(client);
 		return NULL;
 	}
 
@@ -1113,6 +1114,7 @@ struct spcom_server *spcom_register_service(struct spcom_service_info *info)
 	ch = spcom_find_channel_by_name(name);
 	if (!ch) {
 		pr_err("channel %s doesn't exist, load App first.\n", name);
+		kfree(server);
 		return NULL;
 	}
 
@@ -1695,6 +1697,8 @@ static int spcom_handle_write(struct spcom_channel *ch,
 	swap_id = htonl(cmd->cmd_id);
 	memcpy(cmd_name, &swap_id, sizeof(int));
 
+	mutex_lock(&spcom_dev->cmd_lock);
+
 	pr_debug("cmd_id [0x%x] cmd_name [%s].\n", cmd_id, cmd_name);
 
 	switch (cmd_id) {
@@ -1718,8 +1722,10 @@ static int spcom_handle_write(struct spcom_channel *ch,
 		break;
 	default:
 		pr_err("Invalid Command Id [0x%x].\n", (int) cmd->cmd_id);
-		return -EINVAL;
+		ret = -EINVAL;
 	}
+
+	mutex_unlock(&spcom_dev->cmd_lock);
 
 	return ret;
 }
@@ -2038,6 +2044,11 @@ static ssize_t spcom_device_write(struct file *filp,
 	ret = copy_from_user(buf, user_buff, size);
 	if (ret) {
 		pr_err("Unable to copy from user (err %d).\n", ret);
+		kfree(buf);
+		return -EFAULT;
+	}
+
+	if (!ch) {
 		kfree(buf);
 		return -EFAULT;
 	}
@@ -2383,7 +2394,7 @@ static int spcom_probe(struct platform_device *pdev)
 		return -ENOMEM;
 
 	spcom_dev = dev;
-	mutex_init(&dev->lock);
+	mutex_init(&spcom_dev->cmd_lock);
 	init_completion(&dev->link_state_changed);
 	spcom_dev->link_state = GLINK_LINK_STATE_DOWN;
 

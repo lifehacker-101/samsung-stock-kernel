@@ -70,6 +70,10 @@ struct iw_oem_data_rsp
     tANI_U8           oemDataRsp[OEM_DATA_RSP_SIZE];
 };
 
+#if defined (SEC_READ_MACADDR) || defined (SEC_CONFIG_PSM) || defined (SEC_CONFIG_GRIP_POWER)
+#define MAX_RETRY					5
+#endif
+
 int oem_activate_service(void *pAdapter);
 
 int iw_get_oem_data_cap(struct net_device *dev, struct iw_request_info *info,

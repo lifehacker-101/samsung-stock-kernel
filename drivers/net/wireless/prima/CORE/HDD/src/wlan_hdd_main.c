@@ -156,6 +156,15 @@ static int   gbcnMissRate = -1;
 static int wlan_hdd_inited;
 #endif
 
+#if defined(CONFIG_SEC_C7LTE_CHN) || defined(CONFIG_SEC_C7LTE_CHN_HK)
+#define ISC7000 1
+#else
+#define ISC7000 0
+#endif
+
+extern unsigned int system_rev;
+#define WLAN_NV_FILE_WA "wlan/prima/WCNSS_qcom_wlan_nv_wa.bin"
+
 /*
  * spinlock for synchronizing asynchronous request/response
  * (full description of use in wlan_hdd_main.h)
@@ -226,6 +235,17 @@ static vos_wake_lock_t wlan_wake_lock;
 /* set when SSR is needed after unload */
 static e_hdd_ssr_required isSsrRequired = HDD_SSR_NOT_REQUIRED;
 
+/* Samsung specific code */
+#ifdef SEC_READ_MACADDR
+// Read MAC from efs by sh2011.lee@samsung 2011-12-15
+ unsigned char* wlan_hdd_sec_get_mac_addr(int i);
+#endif
+
+/* Samsung specific code */
+#ifdef SEC_WRITE_VERSION_IN_FILE
+// Read MAC from efs by sh2011.lee@samsung 2011-12-15
+ int wlan_hdd_sec_write_version_file (char *riva_version);
+#endif /* SEC_WRITE_VERSION_IN_FILE */
 //internal function declaration
 static VOS_STATUS wlan_hdd_framework_restart(hdd_context_t *pHddCtx);
 static void wlan_hdd_restart_init(hdd_context_t *pHddCtx);
@@ -799,7 +819,7 @@ static int hdd_parse_setrmcenable_command(tANI_U8 *pValue, tANI_U8 *pRmcEnable)
 
     /* getting the first argument which enables or disables RMC
          * for input IP v4 address*/
-    sscanf(inPtr, "%32s ", buf);
+    sscanf(inPtr, "%31s ", buf);
     v = kstrtos32(buf, 10, &tempInt);
     if ( v < 0)
     {
@@ -848,7 +868,7 @@ static int hdd_parse_setrmcactionperiod_command(tANI_U8 *pValue,
 
     /* getting the first argument which enables or disables RMC
          * for input IP v4 address*/
-    sscanf(inPtr, "%32s ", buf);
+    sscanf(inPtr, "%31s ", buf);
     v = kstrtos32(buf, 10, &tempInt);
     if ( v < 0)
     {
@@ -3219,6 +3239,21 @@ static int hdd_driver_command(hdd_adapter_t *pAdapter,
                        "%s: failed to set band ret=%d", __func__, ret);
            }
        }
+
+#ifdef SEC_CONFIG_GRIP_POWER
+       else if (strncmp(command, "SET_TX_POWER_CALLING", 20) == 0)
+       {
+           tANI_U8 *ptr = command ;
+
+           VOS_TRACE(VOS_MODULE_ID_HDD, VOS_TRACE_LEVEL_INFO,
+               "%s: SetGripPower Info  comm %s UL %d, TL %d", __func__, command, priv_data.used_len, priv_data.total_len);
+           ret = hdd_setGripPwr_helper(pAdapter->dev, ptr);
+           if (ret < 0)
+               VOS_TRACE( VOS_MODULE_ID_VOSS, VOS_TRACE_LEVEL_ERROR,
+                   "%s: failed to setGripPwr ret=%d", __func__, ret);
+       }
+#endif /* SEC_CONFIG_GRIP_POWER */
+
        else if(strncmp(command, "SETWMMPS", 8) == 0)
        {
            tANI_U8 *ptr = command;
@@ -7320,6 +7355,18 @@ VOS_STATUS hdd_release_firmware(char *pFileName,v_VOID_t *pCtx)
        else
           status = VOS_STATUS_E_FAILURE;
    }
+   else if(ISC7000 == 1 && system_rev <= 3) {
+		if (!strcmp(WLAN_NV_FILE_WA,pFileName)) {
+			if(pHddCtx->nv) {
+				release_firmware(pHddCtx->nv);
+				pHddCtx->nv = NULL;
+			}
+			else {
+				status = VOS_STATUS_E_FAILURE;
+
+			}
+		}
+   }
    else if (!strcmp(WLAN_NV_FILE,pFileName)) {
        if(pHddCtx->nv) {
           release_firmware(pHddCtx->nv);
@@ -7374,6 +7421,24 @@ VOS_STATUS hdd_request_firmware(char *pfileName,v_VOID_t *pCtx,v_VOID_t **ppfw_d
           hddLog(VOS_TRACE_LEVEL_INFO, "%s: Firmware size = %d",
                  __func__, *pSize);
        }
+   }
+   else if(ISC7000 == 1 && system_rev <= 3) {
+		if(!strcmp(WLAN_NV_FILE_WA, pfileName)) {
+
+			status = request_firmware(&pHddCtx->nv, pfileName, pHddCtx->parent_dev);
+
+			if(status || !pHddCtx->nv || !pHddCtx->nv->data) {
+				hddLog(VOS_TRACE_LEVEL_FATAL, "%s: nv %s download failed",
+					__func__, pfileName);
+				retval = VOS_STATUS_E_FAILURE;
+			}
+			else {
+				*ppfw_data = (v_VOID_t *)pHddCtx->nv->data;
+				*pSize = pHddCtx->nv->size;
+				hddLog(VOS_TRACE_LEVEL_INFO, "%s: nv file size = %d",
+					__func__, *pSize);
+			}
+		}
    }
    else if(!strcmp(WLAN_NV_FILE, pfileName)) {
 
@@ -7765,6 +7830,124 @@ static int __hdd_set_mac_address(struct net_device *dev, void *addr)
    return halStatus;
 }
 
+// Read MAC from efs
+#ifdef SEC_READ_MACADDR
+
+#define SEC_MAC_FILEPATH	"/efs/wifi/.mac.info"
+
+v_MACADDR_t sec_mac_addrs[VOS_MAX_CONCURRENCY_PERSONA];
+static int sec_mac_loaded = 0;
+
+static int wlan_hdd_read_mac_addr(unsigned char *mac);
+
+unsigned char* wlan_hdd_sec_get_mac_addr(int i)
+{
+	if (!sec_mac_loaded) {
+		// station mac
+		if (wlan_hdd_read_mac_addr(sec_mac_addrs[0].bytes) < 0)
+			return NULL;	// Cannot read MAC from efs
+
+		// hotspot mac == sta mac
+		memcpy(&sec_mac_addrs[1].bytes[0], &sec_mac_addrs[0].bytes[0], 6);
+		sec_mac_addrs[1].bytes[0] |= 2;
+
+		// p2p mac
+		memcpy(&sec_mac_addrs[2].bytes[0], &sec_mac_addrs[0].bytes[0], 6);
+		sec_mac_addrs[2].bytes[0] |= 4;
+
+		// monitor mac == sta mac
+		memcpy(&sec_mac_addrs[3].bytes[0], &sec_mac_addrs[0].bytes[0], 6);
+		sec_mac_addrs[3].bytes[0] |= 8;
+
+		sec_mac_loaded = 1;
+	}
+
+	return sec_mac_addrs[i].bytes;
+}
+
+static int wlan_hdd_read_mac_addr(unsigned char *mac)
+{
+	struct file *fp      = NULL;
+	char macbuffer[18]   = {0};
+	mm_segment_t oldfs   = {0};
+	char randommac[3]    = {0};
+	char buf[18]         = {0};
+	char *filepath       = SEC_MAC_FILEPATH;
+	int ret = 0;
+	int i;
+	int create_random_mac = 0;
+	struct dentry *parent;
+	struct dentry *dentry;
+	struct inode *p_inode;
+	struct inode *c_inode;
+
+	for (i = 0; i < MAX_RETRY; ++i) {
+		fp = filp_open(filepath, O_RDONLY, 0);
+		if (IS_ERR(fp) || create_random_mac ==1) {
+			/* File Doesn't Exist. Create and write mac addr.*/
+			fp = filp_open(filepath, O_RDWR | O_CREAT, 0660);
+			if (IS_ERR(fp)) {
+				printk("[WIFI] %s: cannot create a file\n", filepath);
+				return -1;
+			}
+			oldfs = get_fs();
+			set_fs(get_ds());
+			/* set uid , gid of parent directory */
+			dentry = fp->f_path.dentry;
+			parent = dget_parent(dentry);
+			c_inode = dentry->d_inode;
+			p_inode = parent->d_inode;
+			c_inode->i_uid = p_inode->i_uid;
+			c_inode->i_gid = p_inode->i_gid;
+
+			/* Generating the Random Bytes for 3 last octects of the MAC address */
+			get_random_bytes(randommac, 3);
+
+			sprintf(macbuffer, "%02X:%02X:%02X:%02X:%02X:%02X\n",
+						0x00, 0x12, 0x34, randommac[0], randommac[1], randommac[2]);
+			//printk("[WIFI] The randomly generated MAC ID: %s", macbuffer);
+
+			if (fp->f_mode & FMODE_WRITE) {
+				ret = fp->f_op->write(fp, (const char *)macbuffer, sizeof(macbuffer), &fp->f_pos);
+				if (ret < 0)
+					printk("[WIFI] MAC write to %s is failed: %s", filepath, macbuffer);
+				else
+					printk("[WIFI] MAC write to %s is success: %s", filepath, macbuffer);
+			}
+			set_fs(oldfs);
+		}
+
+		/* Reading the MAC Address from .mac.info file (the existed file or just created file)*/
+		ret = kernel_read(fp, 0, buf, 17);
+		buf[17] = '\0';   // to prevent abnormal string display when mac address is displayed on the screen.
+		//printk("[WIFI] Read MAC: [%s]\n", buf);
+
+		if (ret != 17 || strncmp(buf, "00:00:00:00:00:00", 17) == 0) {
+			filp_close(fp, NULL);
+			create_random_mac = 1;
+			continue;// Retry!
+		}
+
+		break;	// Read MAC is success
+	}
+
+	if (fp)
+		filp_close(fp, NULL);
+
+	if (ret) {
+		sscanf(buf, "%02X:%02X:%02X:%02X:%02X:%02X",
+			   (unsigned int *)&(mac[0]), (unsigned int *)&(mac[1]),
+			   (unsigned int *)&(mac[2]), (unsigned int *)&(mac[3]),
+			   (unsigned int *)&(mac[4]), (unsigned int *)&(mac[5]));
+		return 0;	// success
+	}
+
+	printk("[WIFI] Reading MAC from the '%s' is failed.\n", filepath);
+	return -1;	// failed
+}
+
+#endif /* SEC_READ_MACADDR */
+
 /**---------------------------------------------------------------------------
 
   \brief hdd_set_mac_address() -
@@ -7800,15 +7983,39 @@ tANI_U8* wlan_hdd_get_intf_addr(hdd_context_t* pHddCtx)
       return NULL;
 
    pHddCtx->cfg_ini->intfAddrMask |= (1 << i);
+/* samsung specific code */
+#ifdef SEC_READ_MACADDR
+// Read MAC from efs by sh2011.lee@samsung 2011-12-15
+   {
+           tANI_U8* addr = wlan_hdd_sec_get_mac_addr(i);
+           printk("Assigned Interface Index %d\n",i);
+           if (addr != NULL)
+                   return addr;
+   }
+#endif
    return &pHddCtx->cfg_ini->intfMacAddr[i].bytes[0];
 }
 
 void wlan_hdd_release_intf_addr(hdd_context_t* pHddCtx, tANI_U8* releaseAddr)
 {
    int i;
+#ifdef SEC_READ_MACADDR
+   tANI_U8* addr;
+#endif
    for ( i = 0; i < VOS_MAX_CONCURRENCY_PERSONA; i++)
    {
+/* Samsung specific code */
+#ifdef SEC_READ_MACADDR
+      addr = wlan_hdd_sec_get_mac_addr(i);
+
+      if(NULL == addr)
+      {
+         addr = &pHddCtx->cfg_ini->intfMacAddr[i].bytes[0];
+      }
+      if ( !memcmp(releaseAddr, addr, 6) )
+#else
       if ( !memcmp(releaseAddr, &pHddCtx->cfg_ini->intfMacAddr[i].bytes[0], 6) )
+#endif
       {
          pHddCtx->cfg_ini->intfAddrMask &= ~(1 << i);
          break;
@@ -8284,6 +8491,14 @@ void hdd_cleanup_adapter( hdd_context_t *pHddCtx, hdd_adapter_t *pAdapter, tANI_
 #endif
 
    if(test_bit(NET_DEVICE_REGISTERED, &pAdapter->event_flags)) {
+#ifdef CONFIG_SEC
+      if(pWlanDev->reg_state != NETREG_REGISTERED)
+      {
+         hddLog(VOS_TRACE_LEVEL_ERROR,"%s: pWlanDev->reg_state != NETREG_REGISTERED state:%d name:%s\n",
+		    __func__, pWlanDev->reg_state, pWlanDev->name);
+         return;
+      }
+#endif /* CONFIG_SEC */
       if( rtnl_held )
       {
          unregister_netdevice(pWlanDev);
@@ -10999,6 +11214,50 @@ void hdd_prevent_suspend_timeout(v_U32_t timeout, uint32_t reason)
 
 }
 
+// write version info in /data/.fs
+#ifdef SEC_WRITE_VERSION_IN_FILE
+#include "qwlan_version.h"
+
+#define SEC_VERSION_FILEPATH	"/data/misc/conn/.wifiver.info"
+
+int wlan_hdd_sec_write_version_file(char *riva_version)
+{
+   int ret = 0;
+   struct file *fp = NULL;
+   char strbuffer[70]   = {0};
+   mm_segment_t oldfs   = {0};
+
+   oldfs = get_fs();
+   set_fs(get_ds());
+
+   fp = filp_open(SEC_VERSION_FILEPATH, O_RDWR | O_CREAT | O_TRUNC, S_IRUSR|S_IWUSR);
+   if (IS_ERR(fp)) {
+       printk("%s: can't create file : %s",__func__,SEC_VERSION_FILEPATH);
+   }
+   else {
+       if (fp->f_mode & FMODE_WRITE) {
+           if (ISC7000 != 1)
+               snprintf(strbuffer,sizeof(strbuffer),"v%s %s\n", QWLAN_VERSIONSTR, riva_version);
+           else {
+               if (system_rev <= 3)
+                   snprintf(strbuffer,sizeof(strbuffer),"v%s %s\n%s\n", QWLAN_VERSIONSTR, riva_version, WLAN_NV_FILE_WA);
+               else
+                   snprintf(strbuffer,sizeof(strbuffer),"v%s %s\n%s\n", QWLAN_VERSIONSTR, riva_version, WLAN_NV_FILE);
+           } 
+
+           if ( vfs_write(fp, strbuffer, strlen(strbuffer), &fp->f_pos) < 0)
+               printk("%s: can't write file : %s",__func__,SEC_VERSION_FILEPATH);
+           else
+               ret = 1;
+       }
+   }
+   if (fp && (!IS_ERR(fp)))
+       filp_close(fp, NULL);
+   set_fs(oldfs);
+   return ret;
+}
+#endif /* SEC_WRITE_VERSION_IN_FILE */
+
 /**---------------------------------------------------------------------------
 
   \brief hdd_exchange_version_and_caps() - HDD function to exchange version and capability
@@ -11090,6 +11349,13 @@ void hdd_exchange_version_and_caps(hdd_context_t *pHddCtx)
          break;
       }
 
+#ifdef SEC_WRITE_VERSION_IN_FILE
+      if (!wlan_hdd_sec_write_version_file (versionString))
+      {
+         hddLog(VOS_TRACE_LEVEL_FATAL,
+                "%s: faild to write version info in the file",__func__);
+      }
+#endif /* SEC_WRITE_VERSION_IN_FILE */
       pr_info("%s: WCNSS software version %s\n",
               WLAN_MODULE_NAME, versionString);
       vos_mem_copy(pHddCtx->fw_Version, versionString, sizeof(versionString));
@@ -11787,7 +12053,6 @@ int hdd_wlan_startup(struct device *dev )
    pHddCtx->last_scan_reject_session_id = 0xFF;
    pHddCtx->last_scan_reject_reason = 0;
    pHddCtx->last_scan_reject_timestamp = 0;
-   pHddCtx->scan_reject_cnt = 0;
 
    init_completion(&pHddCtx->full_pwr_comp_var);
    init_completion(&pHddCtx->standby_comp_var);
@@ -11897,15 +12162,13 @@ int hdd_wlan_startup(struct device *dev )
    /*
     * cfg80211: Initialization  ...
     */
-   if (VOS_FTM_MODE != hdd_get_conparam())
-   {
       if (0 < wlan_hdd_cfg80211_init(dev, wiphy, pHddCtx->cfg_ini))
       {
          hddLog(VOS_TRACE_LEVEL_FATAL,
                  "%s: wlan_hdd_cfg80211_init return failure", __func__);
          goto err_config;
       }
-   }
+   
 
    // Update VOS trace levels based upon the cfg.ini
    hdd_vos_trace_enable(VOS_MODULE_ID_BAP,
@@ -11978,7 +12241,7 @@ int hdd_wlan_startup(struct device *dev )
       if(!VOS_IS_STATUS_SUCCESS( status ))
       {
          hddLog(VOS_TRACE_LEVEL_FATAL,"%s: vos_watchdog_open failed",__func__);
-         goto err_config;
+         goto err_wdclose;
       }
    }
 
@@ -12248,6 +12511,22 @@ int hdd_wlan_startup(struct device *dev )
          wlan_hdd_get_intf_addr(pHddCtx), FALSE );
      if (pAdapter != NULL)
      {
+#ifdef SEC_READ_MACADDR
+         tANI_U8* p2p_dev_addr = wlan_hdd_get_intf_addr(pHddCtx);
+         if (p2p_dev_addr != NULL)
+         {
+             vos_mem_copy(&pHddCtx->p2pDeviceAddress.bytes[0],
+                           p2p_dev_addr, VOS_MAC_ADDR_SIZE);
+
+             if ( pHddCtx->cfg_ini->isP2pDeviceAddrAdministrated )
+             {
+                 /* Generate the P2P Device Address.  This consists of the device's
+                  * primary MAC address with the locally administered bit set.
+                  */
+                 pHddCtx->p2pDeviceAddress.bytes[0] |= 0x02;
+             }
+         }
+#else /* !SEC_READ_MACADDR */
          if (pHddCtx->cfg_ini->isP2pDeviceAddrAdministrated && !(pHddCtx->cfg_ini->intfMacAddr[0].bytes[0] & 0x02))
          {
                vos_mem_copy( pHddCtx->p2pDeviceAddress.bytes,
@@ -12259,6 +12538,7 @@ int hdd_wlan_startup(struct device *dev )
                 */
                 pHddCtx->p2pDeviceAddress.bytes[0] |= 0x02;
          }
+#endif /* SEC_READ_MACADDR */
          else
          {
              tANI_U8* p2p_dev_addr = wlan_hdd_get_intf_addr(pHddCtx);
@@ -12630,11 +12910,6 @@ int hdd_wlan_startup(struct device *dev )
    /*Fw mem dump procfs initialization*/
    memdump_init();
    hdd_dp_util_send_rps_ind(pHddCtx);
-
-   pHddCtx->is_fatal_event_log_sup =
-      sme_IsFeatureSupportedByFW(FATAL_EVENT_LOGGING);
-   hddLog(VOS_TRACE_LEVEL_INFO, FL("FATAL_EVENT_LOGGING: %d"),
-          pHddCtx->is_fatal_event_log_sup);
 
    goto success;
 
@@ -13085,6 +13360,13 @@ static int fwpath_changed_handler(const char *kmessage,
    int ret;
 
    ret = param_set_copystring(kmessage, kp);
+   if (!strncmp(kmessage, "ftm", 3)) { 
+		pr_info("%s : ftm mode\n", __func__); 
+		con_mode = 5; 
+   } else { 
+		pr_info("%s : mission mode\n", __func__); 
+		con_mode = 0; 
+   } 
    if (0 == ret)
       ret = kickstart_driver();
    return ret;

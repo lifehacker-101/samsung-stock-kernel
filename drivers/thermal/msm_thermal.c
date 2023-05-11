@@ -49,7 +49,13 @@
 #include <linux/suspend.h>
 #include <linux/uaccess.h>
 #include <linux/uio_driver.h>
-
+#include <linux/sec_debug.h>
+#ifdef CONFIG_SEC_AP_HEALTH
+#include <linux/sec_param.h>
+#endif
+#ifdef CONFIG_SEC_PM
+#include <linux/delay.h>
+#endif
 #define CREATE_TRACE_POINTS
 #define TRACE_MSM_THERMAL
 #include <trace/trace_thermal.h>
@@ -239,6 +245,10 @@ struct cpu_info {
 	uint32_t limited_min_freq;
 	bool freq_thresh_clear;
 	struct cluster_info *parent_ptr;
+#ifdef CONFIG_SEC_AP_HEALTH
+	uint32_t acc_throttled_count;
+	uint32_t acc_hotplug_count;
+#endif
 };
 
 struct rail {
@@ -477,6 +487,79 @@ static ssize_t thermal_config_debugfs_write(struct file *file,
 				pr_debug("Remove voting to %s\n", #name);     \
 		}                                                             \
 	} while (0)
+
+#ifdef CONFIG_SEC_AP_HEALTH
+static ap_health_t *ap_health;
+
+static void update_cpu_throttled_count(cpumask_t *mask)
+{
+	int cpu;
+
+	if (!mask)
+		return;
+
+	if (ap_health == NULL)
+		ap_health = ap_health_data_read();
+
+	for_each_cpu(cpu, mask) {
+		cpus[cpu].acc_throttled_count++;
+		if (ap_health == NULL)
+			pr_err("%s: throttle cpu%d, %u times - not stored\n",
+				__func__, cpu, cpus[cpu].acc_throttled_count);
+		else {
+			ap_health->thermal.cpu_throttle_cnt[cpu]++;
+			ap_health->daily_thermal.cpu_throttle_cnt[cpu]++;
+			ap_health_data_write(ap_health);
+			pr_err("%s: throttle cpu%d, %u, %u, %u times\n",
+				__func__, cpu, cpus[cpu].acc_throttled_count,
+				ap_health->thermal.cpu_throttle_cnt[cpu],
+				ap_health->daily_thermal.cpu_throttle_cnt[cpu]);
+		}
+	}
+
+	return;
+}
+
+static void update_hotplug_count(int cpu)
+{
+	cpus[cpu].acc_hotplug_count++;
+
+	if (ap_health == NULL)
+		ap_health = ap_health_data_read();
+
+	if (ap_health == NULL)
+		pr_err("%s: hotplug cpu%d, %u times - not stored\n",
+			__func__, cpu, cpus[cpu].acc_hotplug_count);
+	else {
+		ap_health->thermal.cpu_hotplug_cnt[cpu]++;
+		ap_health->daily_thermal.cpu_hotplug_cnt[cpu]++;
+		ap_health_data_write(ap_health);
+		pr_err("%s: hotplug cpu%d, %u, %u, %u times\n",
+			__func__, cpu, cpus[cpu].acc_hotplug_count,
+			ap_health->thermal.cpu_hotplug_cnt[cpu],
+			ap_health->daily_thermal.cpu_hotplug_cnt[cpu]);
+	}
+
+	return;
+}
+
+static void update_thermal_reset_count(void)
+{
+	if (ap_health == NULL)
+		ap_health = ap_health_data_read();
+
+	if (ap_health != NULL) {
+		ap_health->thermal.ktm_reset_cnt++;
+		ap_health->daily_thermal.ktm_reset_cnt++;
+		ap_health_data_write(ap_health);
+		pr_err("%s: %u %u times\n",
+			__func__, ap_health->thermal.ktm_reset_cnt,
+			ap_health->daily_thermal.ktm_reset_cnt);
+	}
+
+	return;
+}
+#endif /* CONFIG_SEC_AP_HEALTH */
 
 static void uio_init(struct platform_device *pdev)
 {
@@ -1002,6 +1085,9 @@ static void update_cpu_freq(int cpu)
 		} else if (!cpumask_intersects(&mask, &throttling_mask)) {
 			cpumask_or(&throttling_mask, &mask, &throttling_mask);
 			set_cpu_throttled(&mask, true);
+#ifdef CONFIG_SEC_AP_HEALTH
+			update_cpu_throttled_count(&mask);
+#endif
 		}
 		trace_thermal_pre_frequency_mit(cpu,
 			cpus[cpu].limited_max_freq,
@@ -2707,7 +2793,40 @@ static void msm_thermal_bite(int zone_id, long temp)
 	struct scm_desc desc;
 	int tsens_id = 0;
 	int ret = 0;
+/* Workaround for Tsens temp adc bit error */
+#ifdef CONFIG_SEC_PM
+	int sensor_id, id_type, i;
 
+	ret = zone_id_to_tsen_id(zone_id, &tsens_id);
+	if (ret < 0) {
+		sensor_id = zone_id;
+		id_type = THERM_ZONE_ID;
+	} else {
+		sensor_id = tsens_id;
+		id_type = THERM_TSENS_ID;
+	}
+
+	for(i = 0; i < 2; i++) {
+		msleep(1000); /* waiting 1sec for tsens update */
+		ret = therm_get_temp(sensor_id, id_type, &temp);
+		if (ret) {
+			pr_err("Unable to read sensor:%d. err:%d\n",
+				sensor_id, ret);
+			continue;
+		}
+
+		if(temp < msm_thermal_info.therm_reset_temp_degC) {
+			pr_err("Z:%d, T:%d, retry temperature:%ld, Skip SW System reset\n",
+				zone_id, tsens_id, temp);
+			return;
+		}
+	}
+#endif
+
+#ifdef CONFIG_SEC_AP_HEALTH
+	update_thermal_reset_count();
+#endif
+	sec_debug_set_thermal_upload();
 	ret = zone_id_to_tsen_id(zone_id, &tsens_id);
 	if (ret < 0) {
 		pr_err("Zone:%d reached temperature:%ld. Err = %d System reset\n",
@@ -2725,6 +2844,14 @@ static void msm_thermal_bite(int zone_id, long temp)
 				 THERM_SECURE_BITE_CMD), &desc);
 	}
 }
+
+#ifdef CONFIG_USER_RESET_DEBUG_TEST
+void force_thermal_reset(void)
+{
+	msm_thermal_bite(0, msm_thermal_info.therm_reset_temp_degC);
+}
+EXPORT_SYMBOL(force_thermal_reset);
+#endif
 
 static int do_therm_reset(void)
 {
@@ -2822,9 +2949,14 @@ static void __ref do_core_control(long temp)
 				cpu_dev = get_cpu_device(i);
 				trace_thermal_pre_core_offline(i);
 				ret = device_offline(cpu_dev);
-				if (ret < 0)
+				if (ret < 0) {
 					pr_err("Error %d offline core %d\n",
 					       ret, i);
+#ifdef CONFIG_SEC_AP_HEALTH
+				} else {
+					update_hotplug_count(i);
+#endif
+				}
 				trace_thermal_post_core_offline(i,
 					cpumask_test_cpu(i, cpu_online_mask));
 			}
@@ -2870,6 +3002,7 @@ static void __ref do_core_control(long temp)
 	}
 	mutex_unlock(&core_control_mutex);
 }
+
 /* Call with core_control_mutex locked */
 static int __ref update_offline_cores(int val)
 {
@@ -2903,6 +3036,9 @@ static int __ref update_offline_cores(int val)
 				pend_hotplug_req = true;
 			} else {
 				pr_debug("Offlined CPU%d\n", cpu);
+#ifdef CONFIG_SEC_AP_HEALTH
+				update_hotplug_count(cpu);
+#endif
 			}
 			trace_thermal_post_core_offline(cpu,
 				cpumask_test_cpu(cpu, cpu_online_mask));
@@ -7233,8 +7369,31 @@ static struct platform_driver msm_thermal_device_driver = {
 	.remove = msm_thermal_dev_exit,
 };
 
+#ifdef CONFIG_SEC_AP_HEALTH
+static int msm_thermal_sec_param_notifier_callback(
+	struct notifier_block *nfb, unsigned long action, void *data)
+{
+	switch (action) {
+		case SEC_PARAM_DRV_INIT_DONE:
+			ap_health = ap_health_data_read();
+			break;
+		default:
+			return NOTIFY_DONE;
+	}
+
+	return NOTIFY_OK;
+}
+
+static struct notifier_block msm_thermal_sec_param_notifier = {
+	.notifier_call = msm_thermal_sec_param_notifier_callback,
+};
+#endif /* CONFIG_SEC_AP_HEALTH */
+
 int __init msm_thermal_device_init(void)
 {
+#ifdef CONFIG_SEC_AP_HEALTH
+	sec_param_notifier_register(&msm_thermal_sec_param_notifier);
+#endif
 	return platform_driver_register(&msm_thermal_device_driver);
 }
 arch_initcall(msm_thermal_device_init);

@@ -24,6 +24,15 @@
 
 #include <soc/qcom/scm.h>
 
+#include <linux/thread_info.h>
+#include <linux/sched.h>
+#include <linux/string.h>
+#if defined(CONFIG_ARCH_MSM8953)
+#include <linux/smp.h>
+#endif
+
+#include <linux/sec_debug.h>
+
 #define CREATE_TRACE_POINTS
 #include <trace/events/scm.h>
 
@@ -215,6 +224,13 @@ static u32 smc(u32 cmd_addr)
 
 	return r0;
 }
+
+#if defined(CONFIG_ARCH_MSM8953)
+static void __wrap_flush_cache_all(void* vp)
+{
+	flush_cache_all();
+}
+#endif
 
 static int __scm_call(const struct scm_command *cmd)
 {
@@ -624,6 +640,10 @@ static int allocate_extra_arg_buffer(struct scm_desc *desc, gfp_t flags)
 	return 0;
 }
 
+#ifdef CONFIG_TIMA_LKMAUTH
+pid_t pid_from_lkm = -1;
+#endif
+
 /**
  * scm_call2() - Invoke a syscall in the secure world
  * @fn_id: The function ID for this syscall
@@ -647,6 +667,7 @@ static int allocate_extra_arg_buffer(struct scm_desc *desc, gfp_t flags)
 */
 int scm_call2(u32 fn_id, struct scm_desc *desc)
 {
+	int call_from_ss_daemon;
 	int arglen = desc->arginfo & 0xf;
 	int ret, retry_count = 0;
 	u64 x0;
@@ -660,6 +681,13 @@ int scm_call2(u32 fn_id, struct scm_desc *desc)
 
 	x0 = fn_id | scm_version_mask;
 
+	/*
+	 * in case of secure_storage_daemon
+	 */
+	call_from_ss_daemon = (strncmp(current_thread_info()->task->comm, "secure_storage_daemon", TASK_COMM_LEN - 1) == 0);
+
+	sec_debug_secure_log(fn_id, SCM_ENTRY);
+
 	do {
 		mutex_lock(&scm_lock);
 
@@ -670,6 +698,21 @@ int scm_call2(u32 fn_id, struct scm_desc *desc)
 
 		trace_scm_call_start(x0, desc);
 
+#ifdef CONFIG_TIMA_LKMAUTH
+		if ((pid_from_lkm == current_thread_info()->task->pid) || call_from_ss_daemon) {
+#else
+		if (call_from_ss_daemon) {
+#endif
+			flush_cache_all();
+
+#if defined(CONFIG_ARCH_MSM8917) || defined(CONFIG_ARCH_MSM8937) ||  defined(CONFIG_ARCH_MSM8953)
+			smp_call_function((void (*)(void *))__wrap_flush_cache_all, NULL, 1);
+#endif
+
+#ifndef CONFIG_ARM64
+			outer_flush_all();
+#endif
+		}
 		if (scm_version == SCM_ARMV8_64)
 			ret = __scm_call_armv8_64(x0, desc->arginfo,
 						  desc->args[0], desc->args[1],
@@ -695,6 +738,8 @@ int scm_call2(u32 fn_id, struct scm_desc *desc)
 		if (retry_count == 33)
 			pr_warn("scm: secure world has been busy for 1 second!\n");
 	}  while (ret == SCM_V2_EBUSY && (retry_count++ < SCM_EBUSY_MAX_RETRY));
+
+	sec_debug_secure_log(fn_id, SCM_EXIT);
 
 	if (ret < 0)
 		pr_err("scm_call failed: func id %#llx, ret: %d, syscall returns: %#llx, %#llx, %#llx\n",

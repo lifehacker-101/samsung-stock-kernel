@@ -403,6 +403,37 @@ static void mmc_manage_gp_partitions(struct mmc_card *card, u8 *ext_csd)
 	}
 }
 
+/* eMMC 5.0 or later only */
+/*
+ * mmc_merge_ext_csd - merge some ext_csd field to a variable.
+ * @ext_csd : pointer of ext_csd.(1 Byte/field)
+ * @continuous : if you want to merge continuous field, set true.
+ * @count : a number of ext_csd field to merge(=< 8)
+ * @args : list of ext_csd index or first index.
+ */
+static unsigned long long mmc_merge_ext_csd(u8 *ext_csd, bool continuous, int count, ...)
+{
+	unsigned long long merge_ext_csd = 0;
+	va_list args;
+	int i = 0;
+	int index;
+
+	va_start(args, count);
+
+	index = va_arg(args, int);
+	for (i = 0; i < count; i++) {
+		if (continuous) {
+			merge_ext_csd = merge_ext_csd << 8 | ext_csd[index + count - 1 - i];
+		} else {
+			merge_ext_csd = merge_ext_csd << 8 | ext_csd[index];
+			index = va_arg(args, int);
+		}
+	}
+	va_end(args);
+
+	return merge_ext_csd;
+}
+
 /*
  * Decode extended CSD.
  */
@@ -434,6 +465,11 @@ static int mmc_read_ext_csd(struct mmc_card *card, u8 *ext_csd)
 	 * are authorized, see JEDEC JESD84-B50 section B.8.
 	 */
 	card->ext_csd.rev = ext_csd[EXT_CSD_REV];
+
+        /* Support beyond EXT_CSD revision device of JESD84-B50 */
+        if (card->ext_csd.rev > 7)
+                pr_err("%s: EXT_CSD revision is over than 7 (%d)\n",
+                        mmc_hostname(card->host), card->ext_csd.rev);
 
 	card->ext_csd.raw_sectors[0] = ext_csd[EXT_CSD_SEC_CNT + 0];
 	card->ext_csd.raw_sectors[1] = ext_csd[EXT_CSD_SEC_CNT + 1];
@@ -587,6 +623,8 @@ static int mmc_read_ext_csd(struct mmc_card *card, u8 *ext_csd)
 			card->ext_csd.bkops_en = ext_csd[EXT_CSD_BKOPS_EN];
 			card->ext_csd.raw_bkops_status =
 				ext_csd[EXT_CSD_BKOPS_STATUS];
+			if (card->ext_csd.bkops_en & EXT_CSD_BKOPS_AUTO_EN)
+				mmc_card_set_auto_bkops(card);
 			pr_info("%s: BKOPS_EN equals 0x%x\n",
 					mmc_hostname(card->host),
 					card->ext_csd.bkops_en);
@@ -662,6 +700,21 @@ static int mmc_read_ext_csd(struct mmc_card *card, u8 *ext_csd)
 			ext_csd[EXT_CSD_MAX_PACKED_READS];
 	} else {
 		card->ext_csd.data_sector_size = 512;
+	}
+
+	/* eMMC v5.0 or later */
+	if (card->ext_csd.rev >= 7) {
+		card->ext_csd.smart_info = mmc_merge_ext_csd(ext_csd, false, 8,
+			EXT_CSD_DEVICE_LIFE_TIME_EST_TYPE_B,
+			EXT_CSD_DEVICE_LIFE_TIME_EST_TYPE_A,
+			EXT_CSD_PRE_EOL_INFO,
+			EXT_CSD_OPTIMAL_TRIM_UNIT_SIZE,
+			EXT_CSD_DEVICE_VERSION + 1,
+			EXT_CSD_DEVICE_VERSION,
+			EXT_CSD_HC_ERASE_GRP_SIZE,
+			EXT_CSD_HC_WP_GRP_SIZE);
+		card->ext_csd.fwdate = mmc_merge_ext_csd(ext_csd, true, 8,
+			EXT_CSD_FIRMWARE_VERSION);
 	}
 
 	if (card->ext_csd.rev >= 7) {
@@ -791,6 +844,40 @@ out:
 	return err;
 }
 
+static char *mmc_gen_unique_number(struct mmc_card *card)
+{
+	char gen_pnm[3];
+	int i;
+
+	switch (card->cid.manfid) {
+		case 0x02:	/* Sandisk	-> [3][4] */
+		case 0x45:
+			sprintf(gen_pnm, "%.*s", 2, card->cid.prod_name + 3);
+			break;
+		case 0x11:	/* Toshiba	-> [1][2] */
+		case 0x90:	/* Hynix */
+			sprintf(gen_pnm, "%.*s", 2, card->cid.prod_name + 1);
+			break;
+		case 0x13:
+		case 0xFE:	/* Micron	-> [4][5] */
+			sprintf(gen_pnm, "%.*s", 2, card->cid.prod_name + 4);
+			break;
+		case 0x15:	/* Samsung	-> [0][1] */
+		default:
+			sprintf(gen_pnm, "%.*s", 2, card->cid.prod_name + 0);
+			break;
+	}
+	/* Convert to Capital */
+	for (i = 0 ; i < 2 ; i++)
+	{
+		if (gen_pnm[i] >= 'a' && gen_pnm[i] <= 'z')
+			gen_pnm[i] -= ('a' - 'A');
+	}
+	return kasprintf(GFP_KERNEL, "C%s%02X%08X%02X",
+			gen_pnm, card->cid.prv, card->cid.serial,
+			UNSTUFF_BITS(card->raw_cid, 8, 8));
+}
+
 MMC_DEV_ATTR(cid, "%08x%08x%08x%08x\n", card->raw_cid[0], card->raw_cid[1],
 	card->raw_cid[2], card->raw_cid[3]);
 MMC_DEV_ATTR(csd, "%08x%08x%08x%08x\n", card->raw_csd[0], card->raw_csd[1],
@@ -812,6 +899,26 @@ MMC_DEV_ATTR(raw_rpmb_size_mult, "%#x\n", card->ext_csd.raw_rpmb_size_mult);
 MMC_DEV_ATTR(enhanced_rpmb_supported, "%#x\n",
 		card->ext_csd.enhanced_rpmb_supported);
 MMC_DEV_ATTR(rel_sectors, "%#x\n", card->ext_csd.rel_sectors);
+MMC_DEV_ATTR(smart, "0x%016llx\n", card->ext_csd.smart_info);
+MMC_DEV_ATTR(fwdate, "0x%016llx\n", card->ext_csd.fwdate);
+MMC_DEV_ATTR(hpi_support, "%d\n", card->ext_csd.hpi);
+MMC_DEV_ATTR(hpi_enable, "%d\n", card->ext_csd.hpi_en);
+MMC_DEV_ATTR(hpi_command, "%d\n", card->ext_csd.hpi_cmd);
+MMC_DEV_ATTR(bkops_support, "%d\n", card->ext_csd.bkops);
+MMC_DEV_ATTR(bkops_enable, "%d\n", card->ext_csd.bkops_en);
+MMC_DEV_ATTR(caps, "0x%08x\n", (unsigned int)(card->host->caps));
+MMC_DEV_ATTR(caps2, "0x%08x\n", card->host->caps2);
+MMC_DEV_ATTR(erase_type, "MMC_CAP_ERASE %s, type %s, SECURE %s, Sanitize %s\n",
+	card->host->caps & MMC_CAP_ERASE ? "enabled" : "disabled",
+	mmc_can_discard(card) ? "DISCARD" :
+	(mmc_can_trim(card) ? "TRIM" : "NORMAL"),
+	(!(card->quirks & MMC_QUIRK_SEC_ERASE_TRIM_BROKEN) && 
+	 mmc_can_secure_erase_trim(card)) ? "supportable" : "disabled",
+	mmc_can_sanitize(card) ? "enabled" : "disabled");
+MMC_DEV_ATTR(packed_cmd, "packed_cmd %s / %s\n",
+	card->host->caps2 & MMC_CAP2_PACKED_WR ? "WR enabled" : "WR disabled",
+	card->host->caps2 & MMC_CAP2_PACKED_RD ? "RD enabled" : "RD disabled");
+MMC_DEV_ATTR(unique_number, "%s\n", mmc_gen_unique_number(card));
 
 static struct attribute *mmc_std_attrs[] = {
 	&dev_attr_cid.attr,
@@ -831,6 +938,18 @@ static struct attribute *mmc_std_attrs[] = {
 	&dev_attr_raw_rpmb_size_mult.attr,
 	&dev_attr_enhanced_rpmb_supported.attr,
 	&dev_attr_rel_sectors.attr,
+	&dev_attr_smart.attr,
+	&dev_attr_fwdate.attr,
+	&dev_attr_hpi_support.attr,
+	&dev_attr_hpi_enable.attr,
+	&dev_attr_hpi_command.attr,
+	&dev_attr_bkops_support.attr,
+	&dev_attr_bkops_enable.attr,
+	&dev_attr_caps.attr,
+	&dev_attr_caps2.attr,
+	&dev_attr_erase_type.attr,
+	&dev_attr_packed_cmd.attr,
+	&dev_attr_unique_number.attr,
 	NULL,
 };
 ATTRIBUTE_GROUPS(mmc_std);
@@ -1988,7 +2107,8 @@ reinit:
 			}
 			/* enable cache barrier if supported by the device */
 			if (card->ext_csd.cache_ctrl &&
-					card->ext_csd.barrier_support) {
+					card->ext_csd.barrier_support &&
+					(card->host->caps2 & MMC_CAP2_CACHE_BARRIER)) {
 				err = mmc_switch(card, EXT_CSD_CMD_SET_NORMAL,
 					EXT_CSD_BARRIER_CTRL, 1,
 					card->ext_csd.generic_cmd6_time);
@@ -2084,11 +2204,16 @@ reinit:
 	 * handle bkops without START_BKOPS from the host.
 	 */
 	if (mmc_card_support_auto_bkops(card)) {
-		/*
-		 * Ignore the return value of setting auto bkops.
-		 * If it failed, will run in backward compatible mode.
-		 */
-		(void)mmc_set_auto_bkops(card, true);
+		if (host->caps2 & MMC_CAP2_BKOPS_EN) {
+			/*
+			 * Ignore the return value of setting auto bkops.
+			 * If it failed, will run in backward compatible mode.
+			 */
+			(void)mmc_set_auto_bkops(card, true);
+		} else {
+			if (mmc_card_doing_auto_bkops(card))
+				(void)mmc_set_auto_bkops(card, false);
+		}
 	}
 
 	if (card->ext_csd.cmdq_support && (card->host->caps2 &

@@ -10,7 +10,7 @@ ifeq ($(KERNEL_BUILD),1)
 	# These are provided in Android-based builds
 	# Need to explicitly define for Kernel-based builds
 	MODNAME := wlan
-	WLAN_ROOT := drivers/staging/prima
+	WLAN_ROOT := drivers/net/wireless/prima
 endif
 
 ifeq ($(KERNEL_BUILD), 0)
@@ -50,8 +50,8 @@ ifneq ($(CONFIG_PRONTO_WLAN),)
 
 # To enable CONFIG_QCOM_ESE_UPLOAD, dependent config
 # CONFIG_QCOM_ESE must be enabled.
-CONFIG_QCOM_ESE := n
-CONFIG_QCOM_ESE_UPLOAD := n
+CONFIG_QCOM_ESE := y
+CONFIG_QCOM_ESE_UPLOAD := y
 
 # Feature flags which are not (currently) configurable via Kconfig
 
@@ -150,6 +150,18 @@ HDD_OBJS +=	$(HDD_SRC_DIR)/wlan_hdd_cfg80211.o \
 		$(HDD_SRC_DIR)/wlan_hdd_p2p.o
 endif
 
+########## SAMSUNG FEATURE ###########
+CONFIG_WLAN_SAMSUNG_FEATURE=y
+
+ifeq ($(CONFIG_WLAN_SAMSUNG_FEATURE), y)
+# HDD_OBJS += $(HDD_SRC_DIR)/wlan_hdd_custom_sec.o
+EXTRA_CFLAGS += -DSEC_READ_MACADDR
+EXTRA_CFLAGS += -DSEC_CONFIG_PSM
+EXTRA_CFLAGS += -DCONFIG_SEC
+EXTRA_CFLAGS += -DFEATURE_DISABLE_RM
+EXTRA_CFLAGS += -DSEC_WRITE_VERSION_IN_FILE
+EXTRA_CFLAGS += -DSEC_HAL_FEATURE_DISABLE
+endif
 ifeq ($(CONFIG_QCOM_TDLS),y)
 HDD_OBJS +=	$(HDD_SRC_DIR)/wlan_hdd_tdls.o
 endif
@@ -548,7 +560,6 @@ CDEFINES :=	-DANI_BUS_TYPE_PLATFORM=1 \
 		-DWLAN_FEATURE_HOLD_RX_WAKELOCK \
 		-DWLAN_SOFTAP_VSTA_FEATURE \
 		-DWLAN_FEATURE_ROAM_SCAN_OFFLOAD \
-		-DWLAN_FEATURE_GTK_OFFLOAD \
 		-DWLAN_WAKEUP_EVENTS \
 	        -DWLAN_KD_READY_NOTIFIER \
 		-DWLAN_FEATURE_RMC \
@@ -660,6 +671,9 @@ endif
 
 CDEFINES += -DFEATURE_WLAN_CH_AVOID
 CDEFINES += -DWLAN_FEATURE_AP_HT40_24G
+
+# SS grip power control
+CDEFINES += -DSEC_CONFIG_GRIP_POWER
 
 # Some kernel include files are being moved.  Check to see if
 # the old version of the files are present

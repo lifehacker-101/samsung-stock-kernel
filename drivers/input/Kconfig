@@ -25,6 +25,10 @@ config INPUT
 
 if INPUT
 
+config SEC_DEBUG_TSP_LOG
+	tristate "Support for tsp_msg"
+	default n
+
 config INPUT_FF_MEMLESS
 	tristate "Support for memoryless force-feedback devices"
 	help

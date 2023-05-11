@@ -71,7 +71,7 @@
 
 #define CSR_MAX_2_4_GHZ_SUPPORTED_CHANNELS 14
 
-#define CSR_MAX_BSS_SUPPORT            512
+#define CSR_MAX_BSS_SUPPORT            280
 #define SYSTEM_TIME_MSEC_TO_USEC      1000
 #define SYSTEM_TIME_SEC_TO_MSEC       1000
 
@@ -441,6 +441,7 @@ void csrApplyPower2Current( tpAniSirGlobal pMac );
 void csrAssignRssiForCategory(tpAniSirGlobal pMac, tANI_S8 bestApRssi, tANI_U8 catOffset);
 tANI_BOOLEAN csrIsMacAddressZero( tpAniSirGlobal pMac, tCsrBssid *pMacAddr );
 tANI_BOOLEAN csrIsMacAddressBroadcast( tpAniSirGlobal pMac, tCsrBssid *pMacAddr );
+void csrUpdateFCCChannelList(tpAniSirGlobal pMac);
 eHalStatus csrRoamRemoveConnectedBssFromScanCache(tpAniSirGlobal pMac, tCsrRoamConnectedProfile *pConnProfile);
 eHalStatus csrRoamStartRoaming(tpAniSirGlobal pMac, tANI_U32 sessionId, eCsrRoamingReason roamingReason);
 //return a boolean to indicate whether roaming completed or continue.
