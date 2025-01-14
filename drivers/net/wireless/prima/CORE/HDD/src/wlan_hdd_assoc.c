@@ -1249,6 +1249,13 @@ static void hdd_SendAssociationEvent(struct net_device *dev,tCsrRoamInfo *pCsrRo
     {
         VOS_TRACE( VOS_MODULE_ID_HDD, VOS_TRACE_LEVEL_ERROR,
                  "wlan: disconnected");
+        if (pHddCtx->btCoexModeSet) {
+            VOS_TRACE( VOS_MODULE_ID_HDD, VOS_TRACE_LEVEL_INFO,
+                       FL("Wlan disconnected, sending DHCP stop indication"));
+            pHddCtx->btCoexModeSet = FALSE;
+            sme_DHCPStopInd(pHddCtx->hHal, pAdapter->device_mode,
+                            pAdapter->sessionId);
+        }
         type = WLAN_STA_DISASSOC_DONE_IND;
         memset(wrqu.ap_addr.sa_data,'\0',ETH_ALEN);
 
@@ -5817,6 +5824,11 @@ int __iw_get_ap_address(struct net_device *dev,
     else
     {
         memset(wrqu->ap_addr.sa_data,0,sizeof(wrqu->ap_addr.sa_data));
+#ifdef CONFIG_SEC
+		/* CN 999673 [STA] return value of ioctl(SIOCGIWAP) while AP is not connected */
+		hddLog(LOG1, "%s Not Associated, return -EINVAL", __FUNCTION__);
+		return -EINVAL;
+#endif
     }
     EXIT();
     return 0;
