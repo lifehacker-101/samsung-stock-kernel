@@ -10779,16 +10779,7 @@ disconnected:
     return result;
 }
 
-/*
- * hdd_check_and_disconnect_sta_on_invalid_channel() - Disconnect STA if it is
- * on indoor channel
- * @hdd_ctx: pointer to hdd context
- *
- * STA should be disconnected before starting the SAP if it is on indoor
- * channel.
- *
- * Return: void
- */
+
 void hdd_check_and_disconnect_sta_on_invalid_channel(hdd_context_t *hdd_ctx)
 {
 
@@ -10878,6 +10869,13 @@ int wlan_hdd_restore_channels(hdd_context_t *hdd_ctx)
 					wiphy_channel->flags =
 						cache_chann->
 						channel_info[i].wiphy_status;
+						hddLog(VOS_TRACE_LEVEL_DEBUG,
+						"Restore channel %d reg_stat %d wiphy_stat 0x%x",
+							cache_chann->
+							channel_info[i].channel_num,
+							cache_chann->
+							channel_info[i].reg_status,
+						wiphy_channel->flags);
 					break;
 				}
 			}
@@ -10896,17 +10894,7 @@ int wlan_hdd_restore_channels(hdd_context_t *hdd_ctx)
 	return 0;
 }
 
-/*
- * wlan_hdd_disable_channels() - Cache the the channels
- * and current state of the channels from the channel list
- * received in the command and disable the channels on the
- * wiphy and NV table.
- * @hdd_ctx: Pointer to hdd context
- *
- * @return: 0 on success, Error code on failure
- */
-
-static int wlan_hdd_disable_channels(hdd_context_t *hdd_ctx)
+int wlan_hdd_disable_channels(hdd_context_t *hdd_ctx)
 {
 	struct hdd_cache_channels *cache_chann;
 	struct wiphy *wiphy;
@@ -11070,13 +11058,6 @@ static int wlan_hdd_cfg80211_start_bss(hdd_adapter_t *pHostapdAdapter,
         if (hdd_is_sta_sap_scc_allowed_on_dfs_chan(pHddCtx))
             hdd_check_and_disconnect_sta_on_invalid_channel(pHddCtx);
     }
-
-    if (pHostapdAdapter->device_mode == WLAN_HDD_SOFTAP) {
-        /* Disable the channels received in command SET_DISABLE_CHANNEL_LIST*/
-        wlan_hdd_disable_channels(pHddCtx);
-        hdd_check_and_disconnect_sta_on_invalid_channel(pHddCtx);
-    }
-
     pHostapdState = WLAN_HDD_GET_HOSTAP_STATE_PTR(pHostapdAdapter);
 
     pConfig = &pHostapdAdapter->sessionCtx.ap.sapConfig;
@@ -11675,8 +11656,6 @@ static int wlan_hdd_cfg80211_start_bss(hdd_adapter_t *pHostapdAdapter,
 
    return 0;
 error:
-    if (pHostapdAdapter->device_mode == WLAN_HDD_SOFTAP)
-        wlan_hdd_restore_channels(pHddCtx);
    /* Revert the indoor to passive marking if START BSS fails */
     if (iniConfig->disable_indoor_channel &&
                    pHostapdAdapter->device_mode == WLAN_HDD_SOFTAP) {
