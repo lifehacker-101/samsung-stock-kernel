@@ -122,6 +122,11 @@ int wlan_hdd_ftm_start(hdd_context_t *pAdapter);
 #include "sapInternal.h"
 #include "wlan_hdd_request_manager.h"
 
+#ifdef SEC_WRITE_ANT_GPIO_INFO_IN_FILE
+#include <linux/gpio.h>
+#include <linux/of_gpio.h>
+#endif /* SEC_WRITE_ANT_GPIO_INFO_IN_FILE */
+
 #ifdef MODULE
 #define WLAN_MODULE_NAME  module_name(THIS_MODULE)
 #else
@@ -154,6 +159,49 @@ static int   enable_dfs_chan_scan = -1;
 
 #ifndef MODULE
 static int wlan_hdd_inited;
+#if defined (SEC_READ_MACADDR_SYSFS) || defined (SEC_WRITE_VERSION_IN_SYSFS) || defined (SEC_WRITE_SOFTAP_INFO_IN_SYSFS)
+struct kobject *sec_sysfs_kobject;
+
+static ssize_t show_mac_addr(struct kobject *kobj,
+			       struct kobj_attribute *attr,
+			       char *buf);
+static ssize_t store_mac_addr(struct kobject *kobj,
+			       struct kobj_attribute *attr,
+			    const char *buf, size_t count);
+static ssize_t show_verinfo(struct kobject *kobj,
+			       struct kobj_attribute *attr,
+			       char *buf);
+static ssize_t show_softapinfo(struct kobject *kobj,
+			       struct kobj_attribute *attr,
+			       char *buf);
+
+static struct kobj_attribute sec_mac_addr_attribute =
+	__ATTR(mac_addr, 0640, show_mac_addr, store_mac_addr);
+static struct kobj_attribute sec_verinfo_sysfs_attribute =
+	__ATTR(wifiver, 0440, show_verinfo, NULL);
+static struct kobj_attribute sec_softapinfo_sysfs_attribute =
+	__ATTR(softap, 0440, show_softapinfo, NULL);
+
+static struct attribute *sec_sysfs_attrs[] = {
+	&sec_mac_addr_attribute.attr,
+	&sec_verinfo_sysfs_attribute.attr,
+	&sec_softapinfo_sysfs_attribute.attr,
+	NULL
+};
+
+static struct attribute_group sec_sysfs_attr_group = {
+	.attrs = sec_sysfs_attrs,
+};
+
+void sec_sysfs_create(void);
+void sec_sysfs_destroy(void);
+tSirVersionString sec_versionString;
+extern tANI_U8 sec_softapinfoString[256];
+#endif /* SEC_READ_MACADDR_SYSFS || SEC_WRITE_VERSION_IN_SYSFS || SEC_WRITE_SOFTAP_INFO_IN_SYSFS */
+#endif
+
+#ifdef SEC_WLAN_USE_OLD_NV
+extern unsigned int system_rev;
 #endif
 
 /*
@@ -225,6 +273,12 @@ static vos_wake_lock_t wlan_wake_lock;
 
 /* set when SSR is needed after unload */
 static e_hdd_ssr_required isSsrRequired = HDD_SSR_NOT_REQUIRED;
+
+/* Samsung specific code */
+#ifdef SEC_READ_MACADDR_SYSFS
+// Read MAC from efs by sh2011.lee@samsung 2011-12-15
+unsigned char *wlan_hdd_sec_get_mac_addr(int i);
+#endif /* SEC_READ_MACADDR_SYSFS */
 
 //internal function declaration
 static VOS_STATUS wlan_hdd_framework_restart(hdd_context_t *pHddCtx);
@@ -3834,6 +3888,13 @@ int hdd_parse_disable_chan_cmd(hdd_adapter_t *adapter, tANI_U8 *ptr)
 
 mem_alloc_failed:
 	mutex_unlock(&hdd_ctx->cache_channel_lock);
+        /* Disable the channels received in command SET_DISABLE_CHANNEL_LIST*/
+	if (!is_command_repeated) {
+		wlan_hdd_disable_channels(hdd_ctx);
+		hdd_check_and_disconnect_sta_on_invalid_channel(hdd_ctx);
+	}
+
+	
 	EXIT();
 
 	return ret;
@@ -3979,6 +4040,21 @@ static int hdd_driver_command(hdd_adapter_t *pAdapter,
                        "%s: failed to set band ret=%d", __func__, ret);
            }
        }
+
+#ifdef SEC_CONFIG_GRIP_POWER
+		else if (strncmp(command, "SET_TX_POWER_CALLING", 20) == 0) {
+			tANI_U8 *ptr = command;
+
+			VOS_TRACE(VOS_MODULE_ID_HDD, VOS_TRACE_LEVEL_INFO,
+				"%s: SetGripPower Info  comm %s UL %d, TL %d", __func__,
+				command, priv_data.used_len, priv_data.total_len);
+			ret = hdd_setGripPwr_helper(pAdapter->dev, ptr);
+			if (ret < 0)
+				VOS_TRACE(VOS_MODULE_ID_VOSS, VOS_TRACE_LEVEL_ERROR,
+					"%s: failed to setGripPwr ret=%d", __func__, ret);
+		}
+#endif /* SEC_CONFIG_GRIP_POWER */
+
        else if(strncmp(command, "SETWMMPS", 8) == 0)
        {
            tANI_U8 *ptr = command;
@@ -7068,9 +7144,15 @@ free_bcn_miss_rate_req:
         * SET_DISABLE_CHANNEL_LIST <num of channels>
         * <channels separated by spaces>
         */
+#ifdef CONFIG_SEC
+       else if (strncmp(command, "SET_INDOOR_CHANNELS", 19) == 0) {
+            tANI_U8 *ptr = command;
+            ret = hdd_drv_cmd_validate(command, 19);
+#else
        else if (strncmp(command, "SET_DISABLE_CHANNEL_LIST", 24) == 0) {
             tANI_U8 *ptr = command;
             ret = hdd_drv_cmd_validate(command, 24);
+#endif /* CONFIG_SEC */
             if (ret)
                 goto exit;
 
@@ -8471,6 +8553,18 @@ VOS_STATUS hdd_release_firmware(char *pFileName,v_VOID_t *pCtx)
        else
           status = VOS_STATUS_E_FAILURE;
    }
+#ifdef SEC_WLAN_USE_OLD_NV
+   else if (system_rev <= CONFIG_WLAN_USE_OLD_NV && CONFIG_WLAN_USE_OLD_NV != 0) {
+	   if (!strcmp(WLAN_NV_FILE_OLD,pFileName)) {
+		   if(pHddCtx->nv) {
+			  release_firmware(pHddCtx->nv);
+			  pHddCtx->nv = NULL;
+		   }
+		   else
+			  status = VOS_STATUS_E_FAILURE;
+		   }
+   }
+#endif
    else if (!strcmp(WLAN_NV_FILE,pFileName)) {
        if(pHddCtx->nv) {
           release_firmware(pHddCtx->nv);
@@ -8526,6 +8620,27 @@ VOS_STATUS hdd_request_firmware(char *pfileName,v_VOID_t *pCtx,v_VOID_t **ppfw_d
                  __func__, *pSize);
        }
    }
+#ifdef SEC_WLAN_USE_OLD_NV
+   else if (system_rev <= CONFIG_WLAN_USE_OLD_NV && CONFIG_WLAN_USE_OLD_NV != 0) {
+	   if(!strcmp(WLAN_NV_FILE_OLD, pfileName)) {
+
+		   status = request_firmware(&pHddCtx->nv, pfileName, pHddCtx->parent_dev);
+
+		   if(status || !pHddCtx->nv || !pHddCtx->nv->data) {
+			   hddLog(VOS_TRACE_LEVEL_FATAL, "%s: nv %s download failed",
+					  __func__, pfileName);
+			   retval = VOS_STATUS_E_FAILURE;
+		   }
+
+		   else {
+			 *ppfw_data = (v_VOID_t *)pHddCtx->nv->data;
+			 *pSize = pHddCtx->nv->size;
+			  hddLog(VOS_TRACE_LEVEL_INFO, "%s: nv file size = %d",
+					 __func__, *pSize);
+		   }
+	   }
+   }
+#endif
    else if(!strcmp(WLAN_NV_FILE, pfileName)) {
 
        status = request_firmware(&pHddCtx->nv, pfileName, pHddCtx->parent_dev);
@@ -8916,6 +9031,38 @@ static int __hdd_set_mac_address(struct net_device *dev, void *addr)
    return halStatus;
 }
 
+// Read MAC from sysfs
+#ifdef SEC_READ_MACADDR_SYSFS
+v_MACADDR_t sec_mac_addrs[VOS_MAX_CONCURRENCY_PERSONA];
+static int sec_mac_loaded;
+static int sec_mac_loaded_sysfs = 0;
+
+unsigned char *wlan_hdd_sec_get_mac_addr(int i)
+{
+	if (!sec_mac_loaded) {
+		// To chcck whether macloadr write mac or not.
+		if (!sec_mac_loaded_sysfs)
+			return NULL;	// macloader didnot writh MAC from efs
+
+		// hotspot mac == sta mac
+		memcpy(&sec_mac_addrs[1].bytes[0], &sec_mac_addrs[0].bytes[0], 6);
+		sec_mac_addrs[1].bytes[0] |= 2;
+
+		// p2p mac
+		memcpy(&sec_mac_addrs[2].bytes[0], &sec_mac_addrs[0].bytes[0], 6);
+		sec_mac_addrs[2].bytes[0] |= 4;
+
+		// monitor mac == sta mac
+		memcpy(&sec_mac_addrs[3].bytes[0], &sec_mac_addrs[0].bytes[0], 6);
+		sec_mac_addrs[3].bytes[0] |= 8;
+
+		sec_mac_loaded = 1;
+	}
+
+	return sec_mac_addrs[i].bytes;
+}
+#endif /* SEC_READ_MACADDR_SYSFS */
+
 /**---------------------------------------------------------------------------
 
   \brief hdd_set_mac_address() -
@@ -8951,15 +9098,38 @@ tANI_U8* wlan_hdd_get_intf_addr(hdd_context_t* pHddCtx)
       return NULL;
 
    pHddCtx->cfg_ini->intfAddrMask |= (1 << i);
+/* samsung specific code */
+#ifdef SEC_READ_MACADDR_SYSFS
+// Read MAC from efs by sh2011.lee@samsung 2011-12-15
+	{
+		tANI_U8 *addr = wlan_hdd_sec_get_mac_addr(i);
+
+		printk("Assigned Interface Index %d\n", i);
+		if (addr != NULL)
+			return addr;
+	}
+#endif /* SEC_READ_MACADDR_SYSFS */
    return &pHddCtx->cfg_ini->intfMacAddr[i].bytes[0];
 }
 
 void wlan_hdd_release_intf_addr(hdd_context_t* pHddCtx, tANI_U8* releaseAddr)
 {
    int i;
+#ifdef SEC_READ_MACADDR_SYSFS
+	tANI_U8 *addr;
+#endif /* SEC_READ_MACADDR_SYSFS */
    for ( i = 0; i < VOS_MAX_CONCURRENCY_PERSONA; i++)
    {
+/* Samsung specific code */
+#ifdef SEC_READ_MACADDR_SYSFS
+		addr = wlan_hdd_sec_get_mac_addr(i);
+
+		if (addr == NULL)
+			addr = &pHddCtx->cfg_ini->intfMacAddr[i].bytes[0];
+		if (!memcmp(releaseAddr, addr, 6))
+#else /* !SEC_READ_MACADDR_SYSFS */
       if ( !memcmp(releaseAddr, &pHddCtx->cfg_ini->intfMacAddr[i].bytes[0], 6) )
+#endif /* SEC_READ_MACADDR_SYSFS */
       {
          pHddCtx->cfg_ini->intfAddrMask &= ~(1 << i);
          break;
@@ -9378,7 +9548,7 @@ void hdd_deinit_adapter( hdd_context_t *pHddCtx, hdd_adapter_t *pAdapter, tANI_U
          }
 
          hdd_cleanup_actionframe(pHddCtx, pAdapter);
-
+         pr_err("debug: Unregister the hostapd timers");
          hdd_unregister_hostapd(pAdapter, rtnl_held);
          /* set con_mode to STA only when no SAP concurrency mode */
          if (!(hdd_get_concurrency_mode() & (VOS_SAP | VOS_P2P_GO)))
@@ -9436,6 +9606,13 @@ void hdd_cleanup_adapter( hdd_context_t *pHddCtx, hdd_adapter_t *pAdapter, tANI_
 #endif
 
    if(test_bit(NET_DEVICE_REGISTERED, &pAdapter->event_flags)) {
+#ifdef CONFIG_SEC
+		if (pWlanDev->reg_state != NETREG_REGISTERED) {
+			hddLog(VOS_TRACE_LEVEL_ERROR, "%s: pWlanDev->reg_state != NETREG_REGISTERED state:%d name:%s\n",
+				__func__, pWlanDev->reg_state, pWlanDev->name);
+			return;
+		}
+#endif /* CONFIG_SEC */
       if( rtnl_held )
       {
          unregister_netdevice(pWlanDev);
@@ -10468,6 +10645,10 @@ VOS_STATUS hdd_stop_adapter( hdd_context_t *pHddCtx, hdd_adapter_t *pAdapter,
          break;
 
       case WLAN_HDD_SOFTAP:
+          /* Delete all associated STAs before stopping AP */
+          if (test_bit(SOFTAP_BSS_STARTED, &pAdapter->event_flags))
+               hdd_del_all_sta(pAdapter);
+          /* Fall through */	  
       case WLAN_HDD_P2P_GO:
           if ( VOS_TRUE == bCloseSession )
           {
@@ -12648,6 +12829,50 @@ void hdd_prevent_suspend_timeout(v_U32_t timeout, uint32_t reason)
 
 }
 
+#ifdef SEC_WRITE_ANT_GPIO_INFO_IN_FILE
+#define SEC_ANTCABLE_FILEPATH "/data/vendor/conn/.wificable.info"
+void cnss_read_roam_cable(void)
+{
+	struct device_node *np;
+	struct file *fp = NULL;
+	char *filepath = SEC_ANTCABLE_FILEPATH;
+	int wifi_cable = 0;
+
+	char antbuffer[2] = {0};
+	mm_segment_t oldfs = {0};
+
+	oldfs = get_fs();
+	set_fs(get_ds());
+	np = of_find_compatible_node(NULL, NULL, "samsung,wcnss_cable");
+
+	if (!np) {
+		printk(KERN_INFO "[WIFI] %s : cannot find the wcnss_cable\n",__FUNCTION__);
+		goto exit;
+	}
+	fp = filp_open(filepath, O_RDWR | O_CREAT | O_TRUNC, S_IRUSR|S_IWUSR);
+	if (IS_ERR(fp)) {
+		printk("[WIFI] %s: cannot create a file\n", filepath);
+		goto exit;
+	}
+	wifi_cable = of_get_named_gpio(np, "wlan_cable_wifi", 0);
+
+	sprintf(antbuffer, "%c\n", (gpio_get_value(wifi_cable) > 0) ? 'D' : 'E');
+
+	if (fp->f_mode & FMODE_WRITE) {	
+		if (vfs_write(fp, antbuffer, strlen(antbuffer), &fp->f_pos) < 0)
+			printk("[WIFI] write to %s is failed: %s", filepath, antbuffer);
+		else
+			printk("[WIFI] write to %s is success: %s", filepath, antbuffer);
+	}
+	printk(KERN_INFO "[WIFI] %s : gpio=%d value = %d \n",__FUNCTION__, wifi_cable, gpio_get_value(wifi_cable)); 
+
+exit:
+	if (fp)
+		filp_close(fp, NULL);
+	set_fs(oldfs);
+}
+#endif /* SEC_WRITE_ANT_GPIO_INFO_IN_FILE */
+
 /**---------------------------------------------------------------------------
 
   \brief hdd_exchange_version_and_caps() - HDD function to exchange version and capability
@@ -12742,7 +12967,9 @@ void hdd_exchange_version_and_caps(hdd_context_t *pHddCtx)
       pr_info("%s: WCNSS software version %s\n",
               WLAN_MODULE_NAME, versionString);
       vos_mem_copy(pHddCtx->fw_Version, versionString, sizeof(versionString));
-
+#ifdef SEC_WRITE_VERSION_IN_SYSFS
+      vos_mem_copy(sec_versionString, versionString, sizeof(versionString));
+#endif /* SEC_WRITE_VERSION_IN_SYSFS */
       vstatus = sme_GetWcnssHardwareVersion(pHddCtx->hHal,
                                             versionString,
                                             sizeof(versionString));
@@ -13904,6 +14131,21 @@ int hdd_wlan_startup(struct device *dev )
          wlan_hdd_get_intf_addr(pHddCtx), FALSE );
      if (pAdapter != NULL)
      {
+#ifdef SEC_READ_MACADDR_SYSFS
+		tANI_U8 *p2p_dev_addr = wlan_hdd_get_intf_addr(pHddCtx);
+
+		if (p2p_dev_addr != NULL) {
+			vos_mem_copy(&pHddCtx->p2pDeviceAddress.bytes[0],
+				p2p_dev_addr, VOS_MAC_ADDR_SIZE);
+
+			if (pHddCtx->cfg_ini->isP2pDeviceAddrAdministrated) {
+				/* Generate the P2P Device Address.  This consists of the device's
+				* primary MAC address with the locally administered bit set.
+				*/
+				pHddCtx->p2pDeviceAddress.bytes[0] |= 0x02;
+			}
+		 }
+#else /* !SEC_READ_MACADDR_SYSFS */
          if (pHddCtx->cfg_ini->isP2pDeviceAddrAdministrated && !(pHddCtx->cfg_ini->intfMacAddr[0].bytes[0] & 0x02))
          {
                vos_mem_copy( pHddCtx->p2pDeviceAddress.bytes,
@@ -13915,6 +14157,7 @@ int hdd_wlan_startup(struct device *dev )
                 */
                 pHddCtx->p2pDeviceAddress.bytes[0] |= 0x02;
          }
+#endif /* SEC_READ_MACADDR_SYSFS */
          else
          {
              tANI_U8* p2p_dev_addr = wlan_hdd_get_intf_addr(pHddCtx);
@@ -14307,6 +14550,9 @@ int hdd_wlan_startup(struct device *dev )
    hdd_assoc_registerFwdEapolCB(pVosContext);
 
    mutex_init(&pHddCtx->cache_channel_lock);
+#ifdef SEC_WRITE_ANT_GPIO_INFO_IN_FILE
+	cnss_read_roam_cable();
+#endif /* SEC_WRITE_ANT_GPIO_INFO_IN_FILE */
    goto success;
 
 err_open_cesium_nl_sock:
@@ -14574,6 +14820,9 @@ static int __init hdd_module_init ( void)
 static int __init hdd_module_init ( void)
 {
    /* Driver initialization is delayed to fwpath_changed_handler */
+#if defined (SEC_READ_MACADDR_SYSFS) || defined (SEC_WRITE_VERSION_IN_SYSFS) || defined (SEC_WRITE_SOFTAP_INFO_IN_SYSFS)
+	sec_sysfs_create();
+#endif /* SEC_READ_MACADDR_SYSFS || SEC_WRITE_VERSION_IN_SYSFS || SEC_WRITE_SOFTAP_INFO_IN_SYSFS */
    return 0;
 }
 #endif /* #ifdef MODULE */
@@ -14713,6 +14962,9 @@ done:
 static void __exit hdd_module_exit(void)
 {
    hdd_driver_exit();
+#if defined (SEC_READ_MACADDR_SYSFS) || defined (SEC_WRITE_VERSION_IN_SYSFS) || defined (SEC_WRITE_SOFTAP_INFO_IN_SYSFS)
+	sec_sysfs_destroy();
+#endif /* SEC_READ_MACADDR_SYSFS || SEC_WRITE_VERSION_IN_SYSFS || SEC_WRITE_SOFTAP_INFO_IN_SYSFS */
 }
 
 #ifdef MODULE
@@ -14728,6 +14980,133 @@ static int con_mode_handler(const char *kmessage,
    return param_set_int(kmessage, kp);
 }
 #else /* #ifdef MODULE */
+#if defined (SEC_READ_MACADDR_SYSFS) || defined (SEC_WRITE_VERSION_IN_SYSFS) || defined (SEC_WRITE_SOFTAP_INFO_IN_SYSFS)
+static ssize_t __show_mac_addr(struct kobject *kobj,
+				 struct kobj_attribute *attr,
+				 char *buf)
+{
+	return scnprintf(buf, PAGE_SIZE, MAC_ADDRESS_STR, MAC_ADDR_ARRAY(sec_mac_addrs[0].bytes));
+}
+
+static ssize_t show_mac_addr(struct kobject *kobj,
+			       struct kobj_attribute *attr,
+			       char *buf)
+{
+	ssize_t ret_val = 0;
+
+	if (sec_mac_loaded_sysfs) {
+		ret_val = __show_mac_addr(kobj, attr, buf);
+	}
+
+	return ret_val;
+}
+
+static ssize_t __store_mac_addr(struct kobject *kobj,
+			    struct kobj_attribute *attr,
+			    const char *buf,
+			    size_t count)
+{
+
+	sscanf(buf, "%02X:%02X:%02X:%02X:%02X:%02X",
+		(unsigned int *)&(sec_mac_addrs->bytes[0]), (unsigned int *)&(sec_mac_addrs->bytes[1]),
+		(unsigned int *)&(sec_mac_addrs->bytes[2]), (unsigned int *)&(sec_mac_addrs->bytes[3]),
+		(unsigned int *)&(sec_mac_addrs->bytes[4]), (unsigned int *)&(sec_mac_addrs->bytes[5]));
+
+	sec_mac_loaded_sysfs = 1;
+	printk("Assigned Sec Mac from Macloader %d\n", sec_mac_loaded_sysfs);
+
+	return count;
+}
+
+static ssize_t store_mac_addr(struct kobject *kobj,
+			    struct kobj_attribute *attr,
+			    const char *buf,
+			    size_t count)
+{
+	ssize_t ret_val = 0;
+
+	if (!sec_mac_loaded_sysfs) {
+		ret_val = __store_mac_addr(kobj, attr, buf, count);
+	}
+
+	return ret_val;
+}
+
+static ssize_t __show_verinfo(struct kobject *kobj,
+				 struct kobj_attribute *attr,
+				 char *buf)
+{
+	return scnprintf(buf, PAGE_SIZE,
+                          "v%s %s\n", QWLAN_VERSIONSTR, sec_versionString);
+}
+
+static ssize_t show_verinfo(struct kobject *kobj,
+			       struct kobj_attribute *attr,
+			       char *buf)
+{
+	ssize_t ret_val = 0;
+
+	vos_ssr_protect(__func__);
+	ret_val = __show_verinfo(kobj, attr, buf);
+	vos_ssr_unprotect(__func__);
+
+	return ret_val;
+}
+
+static ssize_t __show_softapinfo(struct kobject *kobj,
+				 struct kobj_attribute *attr,
+				 char *buf)
+{
+	return scnprintf(buf, PAGE_SIZE,
+			   "%s\n", sec_softapinfoString);
+}
+
+static ssize_t show_softapinfo(struct kobject *kobj,
+			       struct kobj_attribute *attr,
+			       char *buf)
+{
+	ssize_t ret_val = 0;
+
+	vos_ssr_protect(__func__);
+	ret_val = __show_softapinfo(kobj, attr, buf);
+	vos_ssr_unprotect(__func__);
+
+	return ret_val;
+}
+
+void sec_sysfs_destroy(void)
+{
+	if (sec_sysfs_kobject) {
+		kobject_put(sec_sysfs_kobject);
+		sec_sysfs_kobject = NULL;
+	}
+}
+
+void sec_sysfs_create(void)
+{
+	int error = 0;
+
+	sec_sysfs_kobject = kobject_create_and_add("wifi", NULL);
+	if (!sec_sysfs_kobject) {
+		hddLog( VOS_TRACE_LEVEL_FATAL,
+			"%s: could not allocate sec_sysfs kobject", __func__);
+		return;
+	}
+	
+	error = sysfs_create_group(sec_sysfs_kobject, &sec_sysfs_attr_group);
+	if (error) {
+		hddLog( VOS_TRACE_LEVEL_FATAL,
+			"%s: could not create group", __func__);
+		goto error_sec_sysfs_kobject;
+	}
+
+	return;
+
+error_sec_sysfs_kobject:
+	kobject_put(sec_sysfs_kobject);
+	sec_sysfs_kobject = NULL;
+}
+#endif /* SEC_READ_MACADDR_SYSFS || SEC_WRITE_VERSION_IN_SYSFS || SEC_WRITE_SOFTAP_INFO_IN_SYSFS */
 /**---------------------------------------------------------------------------
 
   \brief kickstart_driver
@@ -14775,6 +15154,15 @@ static int fwpath_changed_handler(const char *kmessage,
    int ret;
 
    ret = param_set_copystring(kmessage, kp);
+#ifdef CONFIG_SEC
+   if (!strncmp(kmessage, "ftm", 3)) {
+      pr_info("%s : ftm mode\n", __func__);
+         con_mode = 5;
+   } else {
+      pr_info("%s : mission mode\n", __func__);
+      con_mode = 0;
+   }
+#endif /* CONFIG_SEC */
    if (0 == ret)
       ret = kickstart_driver();
    return ret;
@@ -15772,6 +16160,8 @@ void hdd_indicate_mgmt_frame(tSirSmeMgmtFrameInd *frame_ind)
    hdd_context_t *hdd_ctx = NULL;
    hdd_adapter_t *adapter = NULL;
    v_CONTEXT_t vos_context = NULL;
+   struct ieee80211_mgmt *mgmt =
+           (struct ieee80211_mgmt *)frame_ind->frameBuf;
 
    /* Get the global VOSS context.*/
    vos_context = vos_get_global_context(VOS_MODULE_ID_SYS, NULL);
@@ -15787,6 +16177,12 @@ void hdd_indicate_mgmt_frame(tSirSmeMgmtFrameInd *frame_ind)
    {
        return;
    }
+
+   if (frame_ind->frameLen < ieee80211_hdrlen(mgmt->frame_control)) {
+        hddLog(LOGE, FL(" Invalid frame length"));
+        return;
+   }
+
    adapter = hdd_get_adapter_by_sme_session_id(hdd_ctx,
                                           frame_ind->sessionId);
 
