@@ -859,6 +859,11 @@ static int _ce_setup_cipher(struct qce_device *pce_dev, struct qce_req *creq,
 	switch (creq->alg) {
 	case CIPHER_ALG_DES:
 		if (creq->mode !=  QCE_MODE_ECB) {
+			if (ivsize > MAX_IV_LENGTH) {
+				pr_err("%s: error: Invalid length parameter\n",
+					 __func__);
+				return -EINVAL;
+			}
 			_byte_stream_to_net_words(enciv32, creq->iv, ivsize);
 			pce = cmdlistinfo->encr_cntr_iv;
 			pce->data = enciv32[0];
@@ -4937,9 +4942,9 @@ int qce_aead_req(void *handle, struct qce_req *q_req)
 		q_req->cryptlen = areq->cryptlen - authsize;
 
 	if ((q_req->cryptlen > UINT_MAX - areq->assoclen) ||
-		(q_req->cryptlen + areq->assoclen > UINT_MAX - ivsize)) {
-			pr_err("Integer overflow on total aead req length.\n");
-			return -EINVAL;
+	    (q_req->cryptlen + areq->assoclen > UINT_MAX - ivsize)) {
+		pr_err("Integer overflow on total aead req length.\n");
+		return -EINVAL;
 	}
 
 	totallen = q_req->cryptlen + areq->assoclen + ivsize;
