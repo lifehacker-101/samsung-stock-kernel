@@ -2357,12 +2357,20 @@ __wlan_hdd_add_virtual_intf(struct wiphy *wiphy,
     pAdapter = NULL;
     if (pHddCtx->cfg_ini->isP2pDeviceAddrAdministrated &&
         ((NL80211_IFTYPE_P2P_GO == type) ||
-         (NL80211_IFTYPE_P2P_CLIENT == type)))
+         (NL80211_IFTYPE_P2P_CLIENT == type)
+#ifdef SEC_READ_MACADDR_SYSFS
+        || !(strncmp(name, "swlan", 5))))
+#endif /* SEC_READ_MACADDR_SYSFS */
     {
             /* Generate the P2P Interface Address. this address must be
              * different from the P2P Device Address.
              */
             v_MACADDR_t p2pDeviceAddress = pHddCtx->p2pDeviceAddress;
+#ifdef CONFIG_SEC
+                       if(!(strncmp(name, "swlan", 5)))
+                               p2pDeviceAddress.bytes[4] ^= 0x40;
+                       else
+#endif
             p2pDeviceAddress.bytes[4] ^= 0x80;
             pAdapter = hdd_open_adapter( pHddCtx,
                                          wlan_hdd_get_session_type(type),
@@ -2547,6 +2555,7 @@ hdd_delete_adapter(hdd_context_t *hdd_ctx, hdd_adapter_t *adapter,
 {
 	wlan_hdd_release_intf_addr(hdd_ctx, adapter->macAddressCurrent.bytes);
 	hdd_stop_adapter(hdd_ctx, adapter, VOS_TRUE);
+	hdd_deinit_adapter(hdd_ctx, adapter, TRUE);
 	hdd_close_adapter(hdd_ctx, adapter, rtnl_held);
 }
 
