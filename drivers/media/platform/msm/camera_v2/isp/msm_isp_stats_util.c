@@ -1,4 +1,4 @@
-/* Copyright (c) 2013-2018, The Linux Foundation. All rights reserved.
+/* Copyright (c) 2013-2017, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -684,12 +684,11 @@ static int msm_isp_start_stats_stream(struct vfe_device *vfe_dev,
 		return -EINVAL;
 	}
 	mutex_lock(&vfe_dev->buf_mgr->lock);
-
 	num_stats_comp_mask =
 		vfe_dev->hw_info->stats_hw_info->num_stats_comp_mask;
 	rc = vfe_dev->hw_info->vfe_ops.stats_ops.check_streams(
 		stats_data->stream_info);
-	if (rc < 0) {
+	if (rc < 0){
 		mutex_unlock(&vfe_dev->buf_mgr->lock);
 		return rc;
 	}
@@ -746,8 +745,8 @@ static int msm_isp_start_stats_stream(struct vfe_device *vfe_dev,
 			stats_data->num_active_stream);
 
 	}
-	mutex_unlock(&vfe_dev->buf_mgr->lock);
 
+	mutex_unlock(&vfe_dev->buf_mgr->lock);
 	if (vfe_dev->axi_data.src_info[VFE_PIX_0].active) {
 		rc = msm_isp_stats_wait_for_cfg_done(vfe_dev);
 	} else {

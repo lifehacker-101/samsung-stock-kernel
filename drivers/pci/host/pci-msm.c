@@ -1,4 +1,4 @@
-/* Copyright (c) 2014-2020, The Linux Foundation. All rights reserved.
+/* Copyright (c) 2014-2018, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -45,6 +45,9 @@
 #include <soc/qcom/scm.h>
 #include <linux/ipc_logging.h>
 #include <linux/msm_pcie.h>
+#ifdef CONFIG_SEC_AP_HEALTH
+#include <linux/sec_param.h>
+#endif
 
 #ifdef CONFIG_ARCH_SDX20
 #define PCIE_VENDOR_ID_RCP		0x17cb
@@ -843,7 +846,6 @@ static const struct msm_pcie_irq_info_t msm_pcie_msi_info[MSM_PCIE_MAX_MSI] = {
 	{"msi_24", 0}, {"msi_25", 0}, {"msi_26", 0}, {"msi_27", 0},
 	{"msi_28", 0}, {"msi_29", 0}, {"msi_30", 0}, {"msi_31", 0}
 };
-
 static void msm_pcie_config_l0s_disable_all(struct msm_pcie_dev_t *dev,
 				struct pci_bus *bus);
 static void msm_pcie_config_l1_disable_all(struct msm_pcie_dev_t *dev,
@@ -855,6 +857,73 @@ static void msm_pcie_config_l1_enable_all(struct msm_pcie_dev_t *dev);
 static void msm_pcie_config_l1ss_enable_all(struct msm_pcie_dev_t *dev);
 static void msm_pcie_check_l1ss_support_all(struct msm_pcie_dev_t *dev);
 static void msm_pcie_config_link_pm(struct msm_pcie_dev_t *dev, bool enable);
+
+#ifdef CONFIG_SEC_AP_HEALTH
+static ap_health_t *p_health;
+
+static int update_phyinit_fail_count(int rc)
+{
+	if (!p_health)
+		p_health = ap_health_data_read();
+
+	if (p_health) {
+		p_health->pcie[rc].phy_init_fail_cnt++;
+		p_health->daily_pcie[rc].phy_init_fail_cnt++;
+		ap_health_data_write(p_health);
+	}
+		
+	return 0;
+}
+
+static int update_linkup_fail_count(int rc, uint32_t ltssm)
+{
+	if (!p_health)
+		p_health = ap_health_data_read();
+
+	if (p_health) {
+		p_health->pcie[rc].link_up_fail_cnt++;
+		p_health->pcie[rc].link_up_fail_ltssm = ltssm;
+		p_health->daily_pcie[rc].link_up_fail_cnt++;
+		p_health->daily_pcie[rc].link_up_fail_ltssm = ltssm;
+		ap_health_data_write(p_health);
+	}
+		
+	return 0;
+}
+
+static int update_linkdown_count(int rc)
+{
+	if (!p_health)
+		p_health = ap_health_data_read();
+
+	if (p_health) {
+		p_health->pcie[rc].link_down_cnt++;
+		p_health->daily_pcie[rc].link_down_cnt++;
+		ap_health_data_write(p_health);
+	}
+		
+	return 0;
+}
+
+static int msm_pcie_sec_param_notifier_callback(
+	struct notifier_block *nfb, unsigned long action, void *data)
+{
+	switch (action) {
+		case SEC_PARAM_DRV_INIT_DONE:
+			p_health = ap_health_data_read();
+			break;
+		default:
+			return NOTIFY_DONE;
+	}
+
+	return NOTIFY_OK;
+}
+
+static struct notifier_block msm_pcie_sec_param_notifier = {
+	.notifier_call = msm_pcie_sec_param_notifier_callback,
+};
+#endif /* CONFIG_SEC_AP_HEALTH */
+
 #ifdef CONFIG_ARM
 #define PCIE_BUS_PRIV_DATA(bus) \
 	(((struct pci_sys_data *)bus->sysdata)->private_data)
@@ -2040,7 +2109,6 @@ static void msm_pcie_sel_debug_testcase(struct msm_pcie_dev_t *dev,
 	u32 current_offset = 0;
 	u32 ep_link_ctrlstts_offset = 0;
 	u32 ep_dev_ctrl2stts2_offset = 0;
-	u32 wr_ofst = 0;
 
 	if (testcase >= 5 && testcase <= 10) {
 		current_offset =
@@ -2230,24 +2298,22 @@ static void msm_pcie_sel_debug_testcase(struct msm_pcie_dev_t *dev,
 			break;
 		}
 
-		wr_ofst = wr_offset;
-
 		PCIE_DBG_FS(dev,
 			"base: %s: 0x%p\nwr_offset: 0x%x\nwr_mask: 0x%x\nwr_value: 0x%x\n",
 			dev->res[base_sel - 1].name,
 			dev->res[base_sel - 1].base,
-			wr_ofst, wr_mask, wr_value);
+			wr_offset, wr_mask, wr_value);
 
 		base_sel_size = resource_size(dev->res[base_sel - 1].resource);
 
-		if (wr_ofst >  base_sel_size - 4 ||
-			msm_pcie_check_align(dev, wr_ofst))
+		if (wr_offset >  base_sel_size - 4 ||
+			msm_pcie_check_align(dev, wr_offset))
 			PCIE_DBG_FS(dev,
 				"PCIe: RC%d: Invalid wr_offset: 0x%x. wr_offset should be no more than 0x%x\n",
-				dev->rc_idx, wr_ofst, base_sel_size - 4);
+				dev->rc_idx, wr_offset, base_sel_size - 4);
 		else
 			msm_pcie_write_reg_field(dev->res[base_sel - 1].base,
-				wr_ofst, wr_mask, wr_value);
+				wr_offset, wr_mask, wr_value);
 
 		break;
 	case 13: /* dump all registers of base_sel */
@@ -4178,6 +4244,9 @@ int msm_pcie_enable(struct msm_pcie_dev_t *dev, u32 options)
 	else {
 		PCIE_ERR(dev, "PCIe PHY RC%d failed to come up!\n",
 			dev->rc_idx);
+#ifdef CONFIG_SEC_AP_HEALTH
+		update_phyinit_fail_count(dev->rc_idx);
+#endif
 		ret = -ENODEV;
 		pcie_phy_dump(dev);
 		goto link_fail;
@@ -4229,6 +4298,9 @@ int msm_pcie_enable(struct msm_pcie_dev_t *dev, u32 options)
 			dev->gpio[MSM_PCIE_GPIO_PERST].on);
 		PCIE_ERR(dev, "PCIe RC%d link initialization failed\n",
 			dev->rc_idx);
+#ifdef CONFIG_SEC_AP_HEALTH
+		update_linkup_fail_count(dev->rc_idx, (val >> 0xC) & 0x3f);
+#endif
 		ret = -1;
 		goto link_fail;
 	}
@@ -5056,6 +5128,10 @@ static irqreturn_t handle_linkdown_irq(int irq, void *data)
 			"PCIe:the link of RC%d is suspending.\n",
 			dev->rc_idx);
 	} else {
+#ifdef CONFIG_SEC_AP_HEALTH
+		update_linkdown_count(dev->rc_idx);
+#endif
+
 		dev->link_status = MSM_PCIE_LINK_DISABLED;
 		dev->shadow_en = false;
 
@@ -6550,6 +6626,10 @@ int __init pcie_init(void)
 	}
 
 	msm_pcie_debugfs_init();
+
+#ifdef CONFIG_SEC_AP_HEALTH
+	sec_param_notifier_register(&msm_pcie_sec_param_notifier);
+#endif
 
 	ret = platform_driver_register(&msm_pcie_driver);
 

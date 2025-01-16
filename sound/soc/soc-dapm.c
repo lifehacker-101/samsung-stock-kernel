@@ -1072,10 +1072,16 @@ int snd_soc_dapm_dai_get_connected_widgets(struct snd_soc_dai *dai, int stream,
 	dapm_reset(card);
 
 	if (stream == SNDRV_PCM_STREAM_PLAYBACK) {
+		if (dai->playback_widget == NULL || list == NULL)
+			return -EINVAL;
+
 		paths = is_connected_output_ep(dai->playback_widget, list);
 		dapm_clear_walk_output(&card->dapm,
 				       &dai->playback_widget->sinks);
 	} else {
+		if (dai->capture_widget == NULL || list == NULL)
+			return -EINVAL;
+
 		paths = is_connected_input_ep(dai->capture_widget, list);
 		dapm_clear_walk_input(&card->dapm,
 				      &dai->capture_widget->sources);

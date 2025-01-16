@@ -897,6 +897,8 @@ static long msm_isp_ioctl_unlocked(struct v4l2_subdev *sd,
 		break;
 	case VIDIOC_MSM_ISP_AXI_HALT:
 		mutex_lock(&vfe_dev->core_mutex);
+		trace_printk("%s:vfe%d AXI_HALT\n",
+			__func__,vfe_dev->pdev->id);
 		rc = msm_isp_axi_halt(vfe_dev, arg);
 		mutex_unlock(&vfe_dev->core_mutex);
 		break;
@@ -905,6 +907,8 @@ static long msm_isp_ioctl_unlocked(struct v4l2_subdev *sd,
 		if (atomic_read(&vfe_dev->error_info.overflow_state)
 			!= HALT_ENFORCED) {
 			rc = msm_isp_stats_reset(vfe_dev);
+			trace_printk("%s:vfe%d AXI_RESET\n",
+				 __func__,vfe_dev->pdev->id);
 			rc2 = msm_isp_axi_reset(vfe_dev, arg);
 			if (!rc && rc2)
 				rc = rc2;
@@ -920,6 +924,8 @@ static long msm_isp_ioctl_unlocked(struct v4l2_subdev *sd,
 		if (atomic_read(&vfe_dev->error_info.overflow_state)
 			!= HALT_ENFORCED) {
 			rc = msm_isp_stats_restart(vfe_dev);
+			trace_printk("%s:vfe%d AXI_RESTART\n",
+				 __func__,vfe_dev->pdev->id);
 			rc2 = msm_isp_axi_restart(vfe_dev, arg);
 			if (!rc && rc2)
 				rc = rc2;
@@ -1605,10 +1611,6 @@ int msm_isp_cal_word_per_line(uint32_t output_format,
 	case V4L2_PIX_FMT_P16GBRG10:
 	case V4L2_PIX_FMT_P16GRBG10:
 	case V4L2_PIX_FMT_P16RGGB10:
-	case V4L2_PIX_FMT_P16BGGR12:
-	case V4L2_PIX_FMT_P16GBRG12:
-	case V4L2_PIX_FMT_P16GRBG12:
-	case V4L2_PIX_FMT_P16RGGB12:
 		val = CAL_WORD(pixel_per_line, 1, 4);
 	break;
 	case V4L2_PIX_FMT_NV24:
@@ -1675,10 +1677,6 @@ enum msm_isp_pack_fmt msm_isp_get_pack_format(uint32_t output_format)
 	case V4L2_PIX_FMT_P16GBRG10:
 	case V4L2_PIX_FMT_P16GRBG10:
 	case V4L2_PIX_FMT_P16RGGB10:
-	case V4L2_PIX_FMT_P16BGGR12:
-	case V4L2_PIX_FMT_P16GBRG12:
-	case V4L2_PIX_FMT_P16GRBG12:
-	case V4L2_PIX_FMT_P16RGGB12:
 		return PLAIN16;
 	default:
 		msm_isp_print_fourcc_error(__func__, output_format);
@@ -1763,10 +1761,6 @@ int msm_isp_get_bit_per_pixel(uint32_t output_format)
 	case V4L2_PIX_FMT_QGRBG12:
 	case V4L2_PIX_FMT_QRGGB12:
 	case V4L2_PIX_FMT_Y12:
-	case V4L2_PIX_FMT_P16BGGR12:
-	case V4L2_PIX_FMT_P16GBRG12:
-	case V4L2_PIX_FMT_P16GRBG12:
-	case V4L2_PIX_FMT_P16RGGB12:
 		return 12;
 	case V4L2_PIX_FMT_SBGGR14:
 	case V4L2_PIX_FMT_SGBRG14:
@@ -1822,6 +1816,8 @@ static int msm_isp_process_iommu_page_fault(struct vfe_device *vfe_dev)
 			&vfe_dev->common_data->common_dev_data_lock, irq_flags);
 		pr_err_ratelimited("%s: overflow detected during IOMMU\n",
 			__func__);
+		trace_printk("%s: overflow detected during IOMMU\n",
+			__func__);
 		/* Don't treat the Overflow + Page fault scenario as fatal.
 		 * Instead try to do a recovery. Using an existing event as
 		 * as opposed to creating a new event.
@@ -1831,6 +1827,8 @@ static int msm_isp_process_iommu_page_fault(struct vfe_device *vfe_dev)
 		spin_unlock_irqrestore(
 			&vfe_dev->common_data->common_dev_data_lock, irq_flags);
 		pr_err("%s:%d] VFE%d Handle Page fault! vfe_dev %pK\n",
+			__func__, __LINE__,  vfe_dev->pdev->id, vfe_dev);
+		trace_printk("%s:%d] VFE%d Handle Page fault! vfe_dev %p\n",
 			__func__, __LINE__,  vfe_dev->pdev->id, vfe_dev);
 		vfe_dev->hw_info->vfe_ops.axi_ops.halt(vfe_dev, 0);
 		msm_isp_halt_send_error(vfe_dev, ISP_EVENT_IOMMU_P_FAULT);
@@ -1917,13 +1915,15 @@ void msm_isp_process_overflow_irq(
 	if (vfe_dev->reset_pending == 1) {
 		pr_err("%s:%d failed: overflow %x during reset\n",
 			__func__, __LINE__, overflow_mask);
+		trace_printk("%s:%d failed: overflow %x during reset\n",
+			__func__, __LINE__, overflow_mask);
 		/* Clear overflow bits since reset is pending */
 		*irq_status1 &= ~overflow_mask;
 		spin_unlock_irqrestore(&vfe_dev->common_data->
 			common_dev_data_lock, flags);
 		return;
 	}
-	ISP_DBG("%s: VFE%d Bus overflow detected: start recovery!\n",
+	trace_printk("%s: VFE%d Bus overflow detected: start recovery!\n",
 		__func__, vfe_dev->pdev->id);
 
 	trace_msm_cam_isp_overflow(vfe_dev, *irq_status0, *irq_status1);
@@ -2011,6 +2011,15 @@ static void msm_isp_enqueue_tasklet_cmd(struct vfe_device *vfe_dev,
 	} else {
 		atomic_add(1, &vfe_dev->irq_cnt);
 	}
+	trace_printk("VFE%d frmid: %d [%s] [%s] [%s] [%s] [%s] irq0: 0x%x irq1: 0x%x\n",
+		vfe_dev->pdev->id,
+		vfe_dev->axi_data.src_info[VFE_PIX_0].frame_id,
+		(irq_status0 & (1 << 0))?"SOF":"",
+		(irq_status0 & (1 << 2))?"EPOCH1":"",
+		(irq_status0 & (1 << 4))?"REGUPDATE":"",
+		(irq_status0 & (1 << 3))?"EPOCH2":"",
+		(irq_status0 & (1 << 1))?"EOF":"",
+		irq_status0, irq_status1);
 	queue_cmd->vfeInterruptStatus0 = irq_status0;
 	queue_cmd->vfeInterruptStatus1 = irq_status1;
 	queue_cmd->vfePingPongStatus = ping_pong_status;
@@ -2140,6 +2149,8 @@ void msm_isp_do_tasklet(unsigned long data)
 		spin_unlock_irqrestore(&vfe_dev->tasklet_lock, flags);
 		ISP_DBG("%s: vfe_id %d status0: 0x%x status1: 0x%x\n",
 			__func__, vfe_dev->pdev->id, irq_status0, irq_status1);
+		trace_printk("%s:START vfe_id %d status0: 0x%x status1: 0x%x\n",
+			__func__, vfe_dev->pdev->id, irq_status0, irq_status1);
 		if (vfe_dev->is_split) {
 			spin_lock(&dump_tasklet_lock);
 			tasklet_data.arr[tasklet_data.first].
@@ -2181,6 +2192,8 @@ void msm_isp_do_tasklet(unsigned long data)
 			irq_status0, irq_status1, &ts);
 		irq_ops->process_epoch_irq(vfe_dev,
 			irq_status0, irq_status1, &ts);
+		trace_printk("END: vfeid: %d irq_status0: 0x%x irq_status1: 0x%x\n",
+	     		vfe_dev->pdev->id, irq_status0, irq_status1);
 	}
 }
 
@@ -2217,6 +2230,8 @@ static void msm_vfe_iommu_fault_handler(struct iommu_domain *domain,
 			atomic_set(&vfe_dev->error_info.overflow_state,
 				HALT_ENFORCED);
 			pr_err_ratelimited("%s: fault address is %lx\n",
+				__func__, iova);
+			trace_printk("%s: fault address is %lx\n",
 				__func__, iova);
 			msm_isp_process_iommu_page_fault(vfe_dev);
 		} else {
